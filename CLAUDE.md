@@ -26,6 +26,13 @@ Stage 1 results (2026-11-15): reference error 1.3e-6; oracle min correlation
 0.99987, top-10 mean 9.96/10, argmax 772/772, greedy answers 44/44 identical
 to TINY.C.
 
+Stage 2 results (2026-11-15): verify.py OK. 19,493 scores and layer
+activities over 3 probes identical, greedy answers 44/44 and sampled answers
+(creativity 5 and 9) identical. Mutation check: changing the C's KV rounding
+by one unit fails at position 36 of the long probe while every answer stays
+the same, which is why the long probe exists. verify.py only builds with gcc:
+the vbcc binary is not covered until stage 3 (see GUI.md section 7).
+
 ## Order of work for any numerical change
 
 1. Change `oracle_tiny.py` (and `fx.py` if a primitive is involved) first.
@@ -74,7 +81,10 @@ these still fit. The value-weight path assumes value absmax < 64.
 | `oracle_tiny.py` | **the specification**: step(), pick(), think() |
 | `check_ref.py` | ref_tiny vs TINY.C |
 | `cmp_fp32.py` | oracle vs float, accuracy gate |
-| `build.py` | `ref`, `convert`, `check` |
+| `tiny68k.c` | the engine (stage 2): step(), pick(), think(), plain-text UI |
+| `scripts/verify.py` | **the gate**: C == oracle (scores, layer activity, answers) |
+| `GUI.md` | stage 4 plan: display, palettes, conio layer, sound, SMW lessons |
+| `build.py` | `ref`, `convert`, `check`, `host`, `verify` |
 
 ## Environment note
 
@@ -84,10 +94,10 @@ PATH; `build.py` sets that up. In Bash: `export PATH=/c/msys64/ucrt64/bin:$PATH`
 ## Roadmap
 
 1. **Done**: float reference, converter, integer oracle, accuracy gate.
-2. `tiny68k.c` host build + `scripts/verify.py` (probe: a question plus its
-   answer, all scores, plus greedy answers to questions.txt).
-3. kick13 cross build, plain text in a CON: window, `-c 0` A/B of the asm and
-   C kernels in WinUAE, cycle-exact timing per letter.
-4. Amiga UI: neon screen, neural monitor, Paula robot voice (or
-   narrator.device), processing letters while the user types.
+2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
+3. kick13 cross build, plain text in a CON: window. Gate the real 68000
+   binary (vbcc C + `matmul68k.s`) against the oracle in Unicorn/Musashi
+   (GUI.md section 7), then WinUAE cycle-exact timing per letter.
+4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
+   layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

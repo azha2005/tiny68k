@@ -5,8 +5,10 @@ build.py -- builds and checks for tiny68k. No shell required.
     python build.py ref        build ref/harness (the original TINY.C, float)
     python build.py convert    orig/TINY.BIN -> tiny.t68
     python build.py check      ref vs TINY.C, then oracle vs float (stage 1 gate)
+    python build.py host       build tiny68k (host, C kernel)
+    python build.py verify     scripts/verify.py: C == oracle, exactly
 
-Stage 2 will add: host (tiny68k.c), verify, amiga, amiga-c.
+Stage 3 will add: amiga, amiga-c (vbcc +kick13) and a 68000-emulator gate.
 """
 import os
 import shutil
@@ -45,6 +47,11 @@ def main():
              os.path.join("ref", "harness.c"), "-lm"])
     elif what == "convert":
         run([sys.executable, "convert_tiny.py", "orig/TINY.BIN", "tiny.t68"])
+    elif what == "host":
+        cc = shutil.which("gcc", path=env()["PATH"]) or "gcc"
+        run([cc, "-O2", "-Wall", "-DA5_HOST", "-o", "tiny68k" + EXE, "tiny68k.c"])
+    elif what == "verify":
+        run([sys.executable, os.path.join("scripts", "verify.py")])
     elif what == "check":
         run([sys.executable, "check_ref.py"])
         run([sys.executable, "cmp_fp32.py"])

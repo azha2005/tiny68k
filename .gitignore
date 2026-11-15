@@ -8,3 +8,9 @@ ref/harness.exe
 __pycache__/
 *.o
 *.exe
+build/
+*.adf
+emu/out/
+emu/*.uae
+tiny68k
+tiny68k_c

@@ -15,11 +15,30 @@
  *   tiny68k tiny.t68 -dump "QUESTION" "ANSWER"
  *        teacher-forced scores for verify.py: per position, VOCAB scores
  *        then L layer activities, one integer per line
+ *
+ * -DTINY_ENGINE_ONLY drops everything that needs libc (files, stdio,
+ * malloc, main) and leaves the engine and its tiny_* entry points. That is
+ * what scripts/m68k_gate.py links raw at a fixed address and runs in a 68000
+ * emulator against the oracle.
  */
 
+#if !defined(TINY_ENGINE_ONLY) || defined(A5_HOST)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#endif
+#if !defined(TINY_ENGINE_ONLY) && defined(A5_HOST)
+#include <time.h>
+#endif
+#if !defined(TINY_ENGINE_ONLY) && !defined(A5_HOST)
+/* dos.library DateStamp (LVO -192), declared here because the NDK headers
+   are not installed. vbcc's kick13 clock() reads 0, so this is the clock.
+   DOSBase is opened by vbcc's startup code. */
+struct TinyDateStamp { long days, minute, tick; };
+extern void *DOSBase;
+void tiny_datestamp(__reg("a6") void *base, __reg("d1") struct TinyDateStamp *ds) =
+    "\tjsr\t-192(a6)";
+#endif
 
 typedef signed char    s8;
 typedef unsigned char  u8;
@@ -48,6 +67,8 @@ typedef unsigned long  u32;
 #define MAXL       8
 #define CUTOFF     9830L       /* 0.15 in Q16.16 */
 
+#define NIL ((void *)0)
+
 #ifdef A5_HOST
 static u16 be16(const void *p) { const u8 *b = (const u8 *)p; return (u16)((b[0] << 8) | b[1]); }
 static s32 be32(const void *p)
@@ -59,8 +80,8 @@ static void fixup32(s32 *a, long n) { long i; for (i = 0; i < n; i++) a[i] = be3
 static void fixup16(u16 *a, long n) { long i; for (i = 0; i < n; i++) a[i] = be16(&a[i]); }
 #else
 #define be16(p)      (*(const u16 *)(p))
-#define fixup32(a, n) ((void)0)
-#define fixup16(a, n) ((void)0)
+#define fixup32(a, n)                /* big-endian already: nothing to do */
+#define fixup16(a, n)
 #endif
 
 /* ---------------------------------------------------------- fixed point */
@@ -271,17 +292,13 @@ static void take_qt(QT *t)
     cursor += n + (n & 1);
 }
 
-static const char *load_model(Model *m, const char *path)
+/* The model lives where the caller loaded it; nothing is copied. */
+static const char *parse_model(Model *m, u8 *blob, long size)
 {
-    FILE *f = fopen(path, "rb");
-    long size, l, k;
-    if (!f) return "cannot open the model file";
-    fseek(f, 0, SEEK_END); size = ftell(f); fseek(f, 0, SEEK_SET);
-    m->blob = (u8 *)malloc(size);
-    if (!m->blob) { fclose(f); return "not enough memory for the model"; }
-    if (fread(m->blob, 1, size, f) != (size_t)size) { fclose(f); return "model file too short"; }
-    fclose(f);
-    if (memcmp(m->blob, "T68A", 4) != 0 || be16(m->blob + 4) != 1)
+    long l, k;
+    m->blob = blob;
+    if (size < 26 || blob[0] != 'T' || blob[1] != '6' || blob[2] != '8' ||
+        blob[3] != 'A' || be16(blob + 4) != 1)
         return "not a version 1 .t68 file";
     m->D   = be16(m->blob + 6);
     m->L   = be16(m->blob + 8);
@@ -305,7 +322,7 @@ static const char *load_model(Model *m, const char *path)
         for (k = 0; k < NT; k++)
             take_qt(&m->t[l][k]);
     if (cursor != m->blob + size) return "model file has the wrong size";
-    return NULL;
+    return NIL;
 }
 
 /* ------------------------------------------------------------ kernels */
@@ -350,15 +367,21 @@ static void matmul_q(const QT *t, const s32 *x, s32 *out)
 
 /* -------------------------------------------------------------- state */
 
-static s8  kc[MAXL][CTX][MAXD], vc[MAXL][CTX][MAXD];
+/* Key/value caches, L * CTX * D bytes each, in memory the caller provides
+   (tiny_kv_bytes()). Sized to the model: static [MAXL][CTX][MAXD] arrays
+   would take 256 KB where TINY needs 96 KB. */
+static s8  *kc, *vc;
+#define KV(m, l, j) (((long)(l) * CTX + (j)) * (m)->D)
 static u16 km[MAXL][CTX], vm[MAXL][CTX];
 static s16 ks[MAXL][CTX], vs[MAXL][CTX];
-static s32 layer_act[MAXL];                 /* Q16.16, for the UI */
+s32 tiny_layer_act[MAXL];                  /* Q16.16, for the UI */
+#define layer_act tiny_layer_act
 
 static s32 bx[MAXD], bh[MAXD], bq[MAXD], bk[MAXD], bv[MAXD], ba[MAXD], bt[MAXD];
 static s32 bm[MAXHID], att[CTX], wgt[CTX];
 static s16 qq[MAXD], wq16[CTX];
-static s32 score[VOCAB];
+s32 tiny_score[VOCAB];                     /* Q16.16 scores of step() */
+#define score tiny_score
 
 static void attention(const Model *m, int l, int p)
 {
@@ -368,7 +391,7 @@ static void attention(const Model *m, int l, int p)
     for (h = 0; h < m->H; h++) {
         o = h * HD;
         for (j = 0; j <= p; j++)
-            att[j] = mulshift(dot_i8_x16(&kc[l][j][o], qq + o, HD),
+            att[j] = mulshift(dot_i8_x16(kc + KV(m, l, j) + o, qq + o, HD),
                               km[l][j], (int)ks[l][j] - qsh);
         mx = att[0];
         for (j = 1; j <= p; j++) if (att[j] > mx) mx = att[j];
@@ -380,7 +403,7 @@ static void attention(const Model *m, int l, int p)
         wsh = quantize16(wgt, p + 1, wq16);
         s = 8 - wsh;
         for (i = 0; i < HD; i++) {
-            acc = dot_x16_i8s(wq16, &vc[l][0][o + i], p + 1, MAXD);
+            acc = dot_x16_i8s(wq16, vc + KV(m, l, 0) + o + i, p + 1, m->D);
             ba[o + i] = s >= 0 ? acc >> s : (s32)((u32)acc << (-s));
         }
     }
@@ -405,8 +428,8 @@ static void step(const Model *m, int tok, int p)
         matmul(&t[T_WK], xq, sh, bk);
         matmul(&t[T_WV], xq, sh, bv);
         matmul(&t[T_WQ], xq, sh, bq);
-        scale_of(store_kv(bk, D, kc[l][p]), m->kc_m, m->kc_s, &km[l][p], &ks[l][p]);
-        scale_of(store_kv(bv, D, vc[l][p]), m->vc_m, m->vc_s, &vm[l][p], &vs[l][p]);
+        scale_of(store_kv(bk, D, kc + KV(m, l, p)), m->kc_m, m->kc_s, &km[l][p], &ks[l][p]);
+        scale_of(store_kv(bv, D, vc + KV(m, l, p)), m->vc_m, m->vc_s, &vm[l][p], &vs[l][p]);
 
         attention(m, l, p);
         matmul_q(&t[T_WO], ba, bt);
@@ -475,6 +498,10 @@ static s32 confidence(const Model *m, int tok)
 }
 
 /* oracle think(): returns the number of letters written to out. */
+/* Told about every letter as soon as it is chosen (the UI prints it then:
+   at ~5 s a letter, waiting for the whole answer is not an option). */
+void (*tiny_on_letter)(int c);
+
 static int think(const Model *m, const char *q, char *out, int creativity)
 {
     int p = 0, n = 0, tok;
@@ -484,11 +511,44 @@ static int think(const Model *m, const char *q, char *out, int creativity)
         tok = pick(m, creativity);
         if (tok <= 1) break;
         out[n++] = (char)(tok + 30);
+        if (tiny_on_letter) tiny_on_letter(tok + 30);
         step(m, tok, p);
     }
     out[n] = 0;
     return n;
 }
+
+/* ------------------------------------------------------ entry points */
+
+/* Non-static on purpose: vbcc inlines static functions and drops their
+   symbols (SMW P37), and the 68000 gate calls these by address. */
+static Model model;
+
+long tiny_kv_bytes(const u8 *blob)
+{
+    return 2L * be16(blob + 8) * CTX * be16(blob + 6);      /* 2 * L * CTX * D */
+}
+
+const char *tiny_init(u8 *blob, long size, s8 *kv)
+{
+    const char *err = parse_model(&model, blob, size);
+    if (err) return err;
+    kc = kv;
+    vc = kv + (long)model.L * CTX * model.D;
+    return NIL;
+}
+
+void tiny_step(int tok, int p) { step(&model, tok, p); }
+
+int tiny_think(const char *q, char *out, int creativity, u32 seed)
+{
+    seed_rng(seed);
+    return think(&model, q, out, creativity);
+}
+
+s32 tiny_confidence(int tok) { return confidence(&model, tok); }
+
+#ifndef TINY_ENGINE_ONLY
 
 /* TINY.C clean(): printable letters only, no trailing spaces, CAPS -> lower. */
 static int clean(const char *line, char *q)
@@ -509,6 +569,42 @@ static int clean(const char *line, char *q)
 
 /* --------------------------------------------------------------- main */
 
+/* Wall time in 1/50 s ticks. */
+static long ticks(void)
+{
+#ifdef A5_HOST
+    return (long)((long)clock() * 50L / (long)CLOCKS_PER_SEC);
+#else
+    struct TinyDateStamp ds;
+    tiny_datestamp(DOSBase, &ds);
+    return (ds.days * 1440L + ds.minute) * 3000L + ds.tick;
+#endif
+}
+
+static void show_letter(int c)
+{
+    putchar(c);
+    fflush(stdout);
+}
+
+static const char *load_model(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    long size;
+    u8 *blob;
+    s8 *kv;
+    if (!f) return "cannot open the model file";
+    fseek(f, 0, SEEK_END); size = ftell(f); fseek(f, 0, SEEK_SET);
+    blob = (u8 *)malloc(size);
+    if (!blob) { fclose(f); return "not enough memory for the model"; }
+    if (fread(blob, 1, size, f) != (size_t)size) { fclose(f); return "model file too short"; }
+    fclose(f);
+    if (size < 26) return "not a version 1 .t68 file";
+    kv = (s8 *)malloc(tiny_kv_bytes(blob));
+    if (!kv) return "not enough memory for the key/value cache";
+    return tiny_init(blob, size, kv);
+}
+
 static int dump(const Model *m, const char *q, const char *a)
 {
     char buf[CTX + 2];
@@ -527,26 +623,27 @@ static int dump(const Model *m, const char *q, const char *a)
 
 int main(int argc, char **argv)
 {
-    static Model m;
     static char line[256], q[MAXQ + 1], out[CTX + 1];
     const char *mp = argc > 1 ? argv[1] : "tiny.t68", *err;
-    int i, creativity = 0, ask = 0;
+    int i, n, creativity = 0, ask = 0, timing = 0;
     u32 seed = 1;
+    long t0, t1;
 
     for (i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "-c") && i + 1 < argc) creativity = atoi(argv[++i]);
+        if (!strcmp(argv[i], "-time")) timing = 1;
+        else if (!strcmp(argv[i], "-c") && i + 1 < argc) creativity = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seed = (u32)atol(argv[++i]);
         else if (!strcmp(argv[i], "-ask")) ask = 1;
         else if (!strcmp(argv[i], "-dump") && i + 2 < argc) {
-            if ((err = load_model(&m, mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
-            return dump(&m, argv[i + 1], argv[i + 2]);
+            if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
+            return dump(&model, argv[i + 1], argv[i + 2]);
         }
     }
-    if ((err = load_model(&m, mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
+    if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
 
     if (!ask) {
         printf("TINY 2.1 for the 68000 - %d layers, %d wide, creativity %d.\n",
-               m.L, m.D, creativity);
+               model.L, model.D, creativity);
         printf("Ask a question, or QUIT.\n");
     }
     for (;;) {
@@ -554,11 +651,17 @@ int main(int argc, char **argv)
         if (fgets(line, sizeof line, stdin) == NULL) break;
         if (clean(line, q) == 0) continue;
         if (!ask && (!strcmp(q, "quit") || !strcmp(q, "exit"))) break;
-        seed_rng(seed);
-        think(&m, q, out, creativity);
-        printf(ask ? "%s\n" : "  %s\n", out);
+        if (!ask) { printf("  "); fflush(stdout); tiny_on_letter = show_letter; }
+        t0 = ticks();
+        n = tiny_think(q, out, creativity, seed);
+        t1 = ticks() - t0;
+        if (ask) printf("%s\n", out);
+        if (!ask || timing)
+            printf("%s   [%d letters, %d positions, %ld.%02ld s]\n", ask ? "" : "\n",
+                   n, (int)strlen(q) + 1 + n, t1 / 50, (t1 % 50) * 2);
         fflush(stdout);
     }
-    (void)confidence;
     return 0;
 }
+
+#endif /* TINY_ENGINE_ONLY */

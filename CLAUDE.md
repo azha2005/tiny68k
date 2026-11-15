@@ -21,6 +21,8 @@ measured against both.
 | float reference = TINY.C | `python check_ref.py` | rel. error < 1e-3, 44/44 answers |
 | integer oracle ~ float | `python cmp_fp32.py` | corr > 0.99, top-10 >= 8, 44/44 answers, PASS |
 | C = oracle (stage 2) | `python scripts/verify.py` | OK, all scores identical |
+| 68000 code = oracle (stage 3) | `python scripts/m68k_gate.py` | OK, both kernels |
+| real executables on KS 1.2 | `python emu/run_test.py` | OK, asm vs C IDENTICAL |
 
 Stage 1 results (2026-11-15): reference error 1.3e-6; oracle min correlation
 0.99987, top-10 mean 9.96/10, argmax 772/772, greedy answers 44/44 identical
@@ -30,8 +32,24 @@ Stage 2 results (2026-11-15): verify.py OK. 19,493 scores and layer
 activities over 3 probes identical, greedy answers 44/44 and sampled answers
 (creativity 5 and 9) identical. Mutation check: changing the C's KV rounding
 by one unit fails at position 36 of the long probe while every answer stays
-the same, which is why the long probe exists. verify.py only builds with gcc:
-the vbcc binary is not covered until stage 3 (see GUI.md section 7).
+the same, which is why the long probe exists. verify.py only builds with gcc.
+
+Stage 3 results (2026-11-15): `m68k_gate.py` compiles the engine with vbcc
++kick13 (`-DTINY_ENGINE_ONLY`), links it raw at $10000 with vlink, and runs
+it in Musashi with tiny.t68 in emulated memory. With `matmul68k.s` and with
+the C kernel: 19,493 scores and layer activities identical, 6 greedy and 2
+sampled answers identical. **This puts the asm kernel inside the
+verification loop**, which amiga260k never had. Musashi cycles per letter
+(no DMA waits, so a lower bound): asm kernel 35.7M at position 0 (5.0 s),
+55.7M at position 96 (7.9 s); C kernel 97.6M (13.8 s). The estimate was
+3.9 s: the difference is overhead outside the MACs, still to be profiled.
+
+## matmul68k.s and vbcc
+
+Unlike in amiga260k, **any change to `matmul68k.s` or to how vbcc compiles
+the engine is checked by `scripts/m68k_gate.py`**. Run it after every change
+to the C or the asm. It cannot see the OS side (file loading, malloc, the
+hunk executable, KS 1.2): that is `emu/run_test.py` in WinUAE.
 
 ## Order of work for any numerical change
 
@@ -84,20 +102,30 @@ these still fit. The value-weight path assumes value absmax < 64.
 | `tiny68k.c` | the engine (stage 2): step(), pick(), think(), plain-text UI |
 | `scripts/verify.py` | **the gate**: C == oracle (scores, layer activity, answers) |
 | `GUI.md` | stage 4 plan: display, palettes, conio layer, sound, SMW lessons |
-| `build.py` | `ref`, `convert`, `check`, `host`, `verify` |
+| `matmul68k.s` | 68000 dot product, `dot_i8_x16` (from amiga260k, unchanged) |
+| `scripts/m68k_gate.py` | vbcc-compiled engine in Musashi/Unicorn == oracle, + cycles |
+| `emu/run_test.py` | the hunk executables in WinUAE, KS 1.2, 512K + 512K A501 |
+| `build.py` | `ref convert check host verify amiga amiga-c gate uae` |
 
 ## Environment note
 
 On this Windows machine gcc only runs with `C:\msys64\ucrt64\bin` first on
 PATH; `build.py` sets that up. In Bash: `export PATH=/c/msys64/ucrt64/bin:$PATH`.
+vbcc is in `C:\Users\JC\vbcc` (override with `VBCC`); its `bin` must be on
+PATH because `vc` calls its sub-tools by name. The NDK headers are not
+installed: declare any OS call by hand with vbcc's `__reg` inline syntax (see
+`tiny_datestamp`). vbcc's kick13 `clock()` always reads 0. Heredocs in the
+Bash tool break quotes and backslashes (SMW P56): write scripts with the
+file tool.
 
 ## Roadmap
 
 1. **Done**: float reference, converter, integer oracle, accuracy gate.
 2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
-3. kick13 cross build, plain text in a CON: window. Gate the real 68000
-   binary (vbcc C + `matmul68k.s`) against the oracle in Unicorn/Musashi
-   (GUI.md section 7), then WinUAE cycle-exact timing per letter.
+3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
+   68000 gate in Musashi, executables on KS 1.2 in WinUAE.
+   Next: cycle-exact timing per letter, and a profile of where the cycles
+   outside the MACs go (35.7M measured vs 27.6M estimated at position 0).
 4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

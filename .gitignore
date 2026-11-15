@@ -1,0 +1,10 @@
+# Upstream TINY 2.1 has no licence: keep its files and anything derived from
+# the weights out of git. See README.md for where to get them.
+orig/*
+!orig/UPSTREAM_COMMIT
+*.t68
+ref/harness
+ref/harness.exe
+__pycache__/
+*.o
+*.exe

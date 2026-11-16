@@ -117,7 +117,7 @@ static int clean(const char *line, char *q)
 #define C_BARON   0x3E
 #define C_HOT     12
 
-static int theme, sound_on = 1, voice_on = 1, demo, dump, dumpq = 4, shots;
+static int theme, sound_on = 1, voice_on = 1, demo, dump, dumpq = 4, shots, keytest;
 static int chat_x = 1, chat_y = 1;
 static char last_q[MAXQ + 1];
 static s32 act_max[MAXL];
@@ -920,7 +920,7 @@ static int ui_main(void)
     chat_save();
     snd_ready();
 
-    if (demo || dump) {
+    if (demo || (dump && !keytest)) {
         for (i = 0; demo_q[i]; i++) {
             if (kbhit()) { key(); break; }
             demo_type(demo_q[i]);
@@ -950,10 +950,12 @@ static int ui_main(void)
         strcpy(last_q, q);
         ask(q);
     }
+    if (keytest) sys_shot("screen");
     status_bar("goodbye");
     sys_flush();
     snd_bye();
     sys_done();
+    if (keytest) printf("ticks %ld\n", sys_ticks());     /* the 50 Hz timer ran */
     printf("TINY: goodbye!\n");
     return 0;
 }
@@ -970,6 +972,8 @@ int main(int argc, char **argv)
             dump = 1;
         else if (is_word(argv[i], "/dump1"))      /* tests: one question */
             dump = 1, dumpq = 1;
+        else if (is_word(argv[i], "/keytest"))    /* tests: a /dump driven by keys */
+            dump = keytest = 1;
         else if (is_word(argv[i], "/shots"))
             dump = shots = 1;
         else if (is_word(argv[i], "/quiet") || is_word(argv[i], "-quiet"))

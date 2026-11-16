@@ -3,7 +3,7 @@
  * Draws with the Amiga renderer (render68k.c) into planes in memory, with
  * topaz 8 read from a Kickstart ROM file (TINY_ROM, default the WinUAE
  * kick12.rom; the font is not copied into this repository). Keys come from
- * TINY_KEYS ("what is dos{ENTER}{F5}{ESC}"), Esc when they run out.
+ * TINY_KEYS ("what is dos{ENTER}{WAIT}{F5}{ESC}"), Esc when they run out.
  * sys_shot(name) writes shot_<name>.bin: for each theme the 4 colours and
  * the two planes, then the cell buffer; scripts/shot_png.py makes PNGs.
  * It also reports any visible glyph drawn with equal ink and paper pens. */
@@ -102,12 +102,20 @@ static int next_key(int take)
     return i;
 }
 
-int sys_kbhit(void) { sys_flush(); return next_key(0) >= 0; }
+/* "{WAIT}" in TINY_KEYS: the keys after it are not there for kbhit (a
+   person types them later), only once the UI waits for a key. */
+int sys_kbhit(void)
+{
+    sys_flush();
+    if (strncmp(keys, "{WAIT}", 6) == 0) return 0;
+    return next_key(0) >= 0;
+}
 
 int sys_getch(void)
 {
     int k;
     sys_flush();
+    while (strncmp(keys, "{WAIT}", 6) == 0) keys += 6;
     k = next_key(1);
     return k < 0 ? K_ESC : k;
 }
@@ -130,7 +138,8 @@ void sys_shot(const char *name)
     f = fopen(fn, "wb");
     if (!f) return;
     fwrite("TSH1", 1, 4, f);
-    put16(f, NTHEME);
+    fputc(theme, f);                       /* the theme on screen */
+    fputc(NTHEME, f);
     con_cursor(&cx, &cy);
     for (t = 0; t < NTHEME; t++) {
         con_touch_all();

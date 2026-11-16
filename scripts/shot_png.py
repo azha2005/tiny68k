@@ -21,7 +21,7 @@ def main():
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(src) or "."
     raw = open(src, "rb").read()
     assert raw[:4] == b"TSH1"
-    n = struct.unpack_from(">H", raw, 4)[0]
+    n = raw[5]                          # raw[4]: the theme on screen
     off = 6
     base = os.path.splitext(os.path.basename(src))[0]
     for t in range(n):

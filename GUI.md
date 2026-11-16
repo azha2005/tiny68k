@@ -20,7 +20,7 @@ hard way.
 | `scripts/shot_png.py` | shot file -> one PNG per theme |
 
 Build: `python build.py gui` (-> `tinygui`), `python build.py gui-host`
-(-> `tinyui`), test: `python build.py gui-uae [--exact]`.
+(-> `tinyui`), test: `python build.py gui-uae [--exact] [--keys]`.
 
 The UI uses its own random generator (`ui_rand`), and a `/dump` fixes the
 sampling seed, the clock (12:00) and the timing (0.0 s), so the screen after
@@ -158,10 +158,15 @@ the first differing position. The separator step (token 1) is a full step.
 
 ## 6. Verification
 
-Status: 2 and 3 are done as `emu/gui_test.py` (the full 3-theme shot from
-WinUAE equals the host's byte for byte, which also shows the OS came back
-to write it). Not covered: the keyboard interrupt and F5 on the Amiga
-(a dump presses no keys), and the comparison with TINY.EXE in DOSBox.
+Status: 2 and 3 are done as `emu/gui_test.py`. The 3-theme shot from
+WinUAE equals the host's byte for byte, in fast and cycle-exact mode.
+`--keys` types a question with shift, Enter, F5 and `quit` into the WinUAE
+window: the keyboard interrupt, keymap, F5 (the shot header carries the
+theme on screen) and the 50 Hz TOD timer are covered too. The shot is
+written by DOS after `sys_done()`, so DOS, interrupts and the disk came
+back; that the CLI's display came back has not been checked by a test.
+Not covered: caps lock (WinUAE handles it specially), sound (a stub), and
+the comparison with TINY.EXE in DOSBox.
 
 1. The numerical engine stays behind `scripts/verify.py`. The UI never touches
    step(), and reads layer_act / confidence (already in the oracle).

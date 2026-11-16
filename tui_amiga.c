@@ -273,7 +273,7 @@ static int poll_key(void)
         int raw = kb_buf[kb_tail], up = raw & 0x80, k = raw & 0x7F, c;
         kb_tail = (u16)((kb_tail + 1) & 63);
         if (k == 0x60 || k == 0x61) { shift = !up; continue; }
-        if (k == 0x62) { if (!up) caps = !caps; continue; }
+        if (k == 0x62) { caps = !up; continue; }   /* down = LED on, up = LED off */
         if (up) continue;
         if (k == 0x44 || k == 0x43) return K_ENTER;
         if (k == 0x41) return K_BS;
@@ -339,7 +339,7 @@ void sys_shot(const char *name)
     if (!shot) return;
     strncpy(shot_name, name, 31);
     s = shot;
-    memcpy(s, "TSH1", 4); s[4] = 0; s[5] = NTHEME; s += 6;
+    memcpy(s, "TSH1", 4); s[4] = (u8)theme; s[5] = NTHEME; s += 6;
     con_cursor(&cx, &cy);
     for (t = 0; t < NTHEME; t++) {
         for (i = 0; i < 4; i++) { *s++ = (u8)(theme_rgb[t][i] >> 8); *s++ = (u8)theme_rgb[t][i]; }

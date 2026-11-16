@@ -93,12 +93,21 @@ changes go in a user copper list (`UCopList`, available on 1.2).
   `translator.library` from the Workbench 1.2 disk give real speech. About 30
   KB of memory.
 
+## 4b. Measured: the display is not free
+
+`emu/bench.py` (cycle-exact): with the hires 2-plane screen on, the table
+look-up loop runs 5.6% slower and the sparse loop 3% slower than with
+bitplane DMA off. Options: blank or shrink the bitplane window while a
+letter is being computed (the UI is idle then), and take over the OS
+(interrupts, multitasking: ~5% of every loop) as amivideo does.
+
 ## 5. Reading while typing
 
 The network is causal, so each letter of the question can go through step()
 **while it is being typed**. Backspace rewinds the position and overwrites the
-cache. Since the question takes about half the time of an answer, this hides
-roughly two minutes per question. The numbers are unchanged: it is the same
+cache. A prefill letter costs ~2.7 s on a real A500 and people type ~3
+letters a second, so this hides only the typing time (10-20 s of the ~73 s
+prefill of a 27-letter question), not the whole prefill. The numbers are unchanged: it is the same
 sequence of step() calls, and verify.py still covers it.
 
 Use `tiny_prefill()` for the typed letters (what `think()` does): it skips the

@@ -80,6 +80,18 @@ Optimisation round 2 (2026-11-15), bit-exact, oracle untouched:
   operand swap (~4% net on real HW only), tables for wo/emb/keys and nibble
   tables (do not break even), word-sized weights (+209 KB for ~3.6%).
 
+Committed round 2, cycle-exact WinUAE, KS 1.2: "Lima." **99.6 s** (Musashi
+88.3 s, ratio 1.13). `emu/bench.py` (with `bench68k.c`) times each asm
+routine on fixed data in cycle-exact WinUAE and in Musashi, normally and with
+bitplane+sprite DMA off. Real/Musashi: tab_dots 1.14 (1.08 without display),
+sparse f2 1.12 (1.09), dense dots 1.10 (1.10), build_tab 1.18 (1.18), C loop
+1.06 (1.05). So: the hires 2-plane Workbench screen does cost 3-5% in the
+memory-heavy loops (it is not contention-free), build_tab's gap is
+instruction timing Musashi underestimates, and ~5% is common to everything
+(OS interrupts / timing details). Levers left for stage 4: owning the
+display (smaller or blanked bitplane window while computing) and the OS
+(amivideo-style takeover). Resolution is 1/50 s per ~4 s case.
+
 WinUAE (`emu/run_test.py`): it used to wait for a `done.txt` that KS 1.2
 never wrote (no C: on the floppy, so no `echo`), and WinUAE throttled itself
 while its window was inactive. Now it ends when every output has its timing

@@ -102,6 +102,46 @@ longword-aligned struct; fixed. Fast-mode times are not Amiga times; use
 `--exact` for those. Never use JIT for this check: it needs a 68020, which
 does not trap on odd-address accesses.
 
+Optimisation round 3 (2026-11-15), bit-exact, oracle untouched:
+- **Bit-plane group tables** (T-MAC, arXiv 2407.00088) for wq wk wv wo f1.
+  `tiny_init` reorders those weights in place (`bitplane_blocks`, blob
+  marked 'C'): u = w ^ 0x80, and per block of 8 rows, per plane k = 7..0,
+  per group of 8 columns, one byte per row holding bit k of 8 weights.
+  `build_bptab` makes one 256-entry s32 table per 8 inputs (all subset sums,
+  in ruler order: T[b] = T[b-1] + D[ctz(b)]). `bp_dots` keeps 8 row
+  accumulators in registers, Horner over planes (acc = 2 acc + T[byte]),
+  and subtracts 128 * sum(x). Exact integer arithmetic, so same scores.
+  f2 stays sparse (its ReLU input is mostly zero; tables lose there).
+- Musashi: "Lima." 88.3 -> **72.8 s**; 2.45 s full letter at position 0,
+  1.93 s prefill letter. **Cycle-exact WinUAE, KS 1.2: 99.6 -> 82.0 s**
+  (130.3 s before round 1). Real/Musashi 1.13.
+- Profile at position 0: bp_dots 61%, sparse f2 11%, mulshift_rows 6%,
+  fxcore 5%, dense dots (emb scores, keys) 4%, build_bptab 4%. Exact ideas
+  left, each small: emb scores through bit planes (~1%, 9 KB copy), K/V
+  cache in bit-plane layout (1.5-5%, grows with position), groups of 6.
+- **Fewer weight bits: measured, not adopted** (`scripts/quant_explore.py`,
+  Python only, spec untouched). bp_dots cost is linear in planes, so b bits
+  would save ~61% x (8-b)/8 at position 0 (estimate). But TINY is at its
+  edge at int8 (requantising the int8 weights):
+
+  | bits (wq wk wv wo f1) | method | corr min | greedy /44 | held-out /40 vs int8 |
+  |---|---|---|---|---|
+  | 7 | rtn | 0.9925 | 42 | 38 |
+  | 7 | clip (MSE, act-weighted) | 0.9919 | 43 | 34 |
+  | 7 | GPTQ, calibrated on the 44 | 0.9943 | **44** (leak) | 37 |
+  | 7 | GPTQ, calibrated on held-out | 0.9929 | 43 | - |
+  | 6 | rtn / clip / GPTQ | 0.97-0.98 | 38-39 | - |
+  | 5 | rtn / clip / GPTQ | 0.89-0.93 | 35-38 | - |
+  | 4 | rtn / clip / GPTQ | 0.69-0.82 | 18-24 | - |
+
+  A single tensor at 6 bits already changes 2-5 answers (f1 worst, wq
+  least), so per-tensor bit allocation (RCO) has no room either. Most
+  changes are rewordings ("It has eight legs." for "Eight."), some are wrong
+  facts. The only route to 4-5 bits is retraining with quantisation in the
+  loop (QAT / GSQ) with upstream's TRAINKIT: a different model, so
+  "identical to TINY.C" could no longer be the bar. `scripts/heldout.txt` is
+  40 questions not in `questions.txt`.
+
 ## matmul68k.s and vbcc
 
 Unlike in amiga260k, **any change to `matmul68k.s` or to how vbcc compiles
@@ -163,6 +203,7 @@ these still fit. The value-weight path assumes value absmax < 64.
 | `matmul68k.s` | 68000 hot routines: dot products, sparse dot, column tables, fxmul, mulshift (register calls) |
 | `scripts/asm_unit.py` | each `matmul68k.s` routine vs its C fallback, register preservation |
 | `scripts/muls_bits.py` | MULS operand bit-transition statistics on real data |
+| `scripts/quant_explore.py` | experiment: fewer weight bits per tensor vs the accuracy bar |
 | `scripts/m68k_prof.py` | per-function cycle profile in Musashi |
 | `scripts/m68k_gate.py` | vbcc-compiled engine in Musashi/Unicorn == oracle, + cycles |
 | `emu/run_test.py` | the hunk executables in WinUAE, KS 1.2, 512K + 512K A501 |
@@ -185,7 +226,7 @@ file tool.
 2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
 3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
    68000 gate in Musashi, executables on KS 1.2 in WinUAE.
-   Optimisation rounds 1-2 done: "Lima." 130 -> 101 s cycle-exact.
+   Optimisation rounds 1-3 done: "Lima." 130 -> 82 s cycle-exact.
 4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

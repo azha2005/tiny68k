@@ -104,6 +104,17 @@ float:
 | argmax agreement | 772/772 |
 | greedy answers identical to TINY.C | 44/44 |
 
+## How it was made
+
+Built with [Claude Code](https://claude.com/claude-code). Claude wrote the
+float reference, the integer specification, the C engine, the 68000
+assembly, the Amiga interface, the test gates and the emulator harnesses;
+the author directed the work and ran it on a real Amiga 500. The method that
+kept it correct is in `AGENTS.md`: a Python integer specification first, then
+every C or assembly change checked bit for bit against it (gcc on the host,
+vbcc code in an emulated 68000, the real executables in WinUAE on
+Kickstart 1.2).
+
 ## Credits
 
 - **TINY 2.1**: [WollyMonjac](https://github.com/WollyMonjac),

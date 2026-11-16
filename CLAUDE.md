@@ -104,17 +104,22 @@ does not trap on odd-address accesses.
 
 Optimisation round 3 (2026-11-15), bit-exact, oracle untouched:
 - **Bit-plane group tables** (T-MAC, arXiv 2407.00088) for wq wk wv wo f1.
-  `tiny_init` reorders those weights in place (`bitplane_blocks`, blob
-  marked 'C'): u = w ^ 0x80, and per block of 8 rows, per plane k = 7..0,
-  per group of 8 columns, one byte per row holding bit k of 8 weights.
-  `build_bptab` makes one 256-entry s32 table per 8 inputs (all subset sums,
+  `tiny_init` reorders those weights (`bitplane_blocks`, blob marked 'C'):
+  u = w ^ 0x80, and per block of 8 rows, per plane k = 7..0, per group of
+  6 columns, one byte per row holding 4 * (bit k of the 6 weights).
+  `build_bptab` makes one 64-entry s32 table per 6 inputs (all subset sums,
   in ruler order: T[b] = T[b-1] + D[ctz(b)]). `bp_dots` keeps 8 row
-  accumulators in registers, Horner over planes (acc = 2 acc + T[byte]),
+  accumulators in registers, Horner over planes (acc = 2 acc + T[byte/4]),
   and subtracts 128 * sum(x). Exact integer arithmetic, so same scores.
   f2 stays sparse (its ReLU input is mostly zero; tables lose there).
-- Musashi: "Lima." 88.3 -> **72.8 s**; 2.45 s full letter at position 0,
-  1.93 s prefill letter. **Cycle-exact WinUAE, KS 1.2: 99.6 -> 82.0 s**
-  (130.3 s before round 1). Real/Musashi 1.13.
+  (First committed with groups of 8 and 256-entry tables; see below.)
+- **The caller memory (kv) now holds model data**: planes 1..0 of every
+  bit-plane table live after the group tables. Never clear or reallocate
+  the whole kv block (a stage 4 "new conversation" must not), and never
+  tiny_init() a 'C' blob with a different kv block: scores go silently wrong.
+- With groups of 8 (8692807): Musashi "Lima." 88.3 -> 72.8 s; 2.45 s full
+  letter at position 0, 1.93 s prefill letter. Cycle-exact WinUAE, KS 1.2:
+  99.6 -> 82.0 s (130.3 s before round 1). Real/Musashi 1.13.
 - Profile at position 0 then: bp_dots 61%, sparse f2 11%, mulshift_rows 6%,
   fxcore 5%, dense dots (emb scores, keys) 4%, build_bptab 4%.
 - `fxcore` skips the two products of a zero high half (87% of fxmul calls
@@ -129,8 +134,11 @@ Optimisation round 3 (2026-11-15), bit-exact, oracle untouched:
   of 6 bits take 4/3 of the int8 space; planes 7..2 stay in the block's own
   bytes and planes 1..0 go to a spill area after the tables in the caller
   memory (`tiny_kv_bytes`, +80 KB; `QT.spill`). Musashi "Lima." 71.1 ->
-  **67.8 s** (2.28 s full letter, 1.78 s prefill letter). **Cycle-exact
-  WinUAE, KS 1.2: 82.0 -> 76.9 s.**
+  **67.8 s** (2.28 s full letter, 1.78 s prefill letter; C kernel 8.08 s).
+  **Cycle-exact WinUAE, KS 1.2: 82.0 -> 76.9 s** for this and the fxcore /
+  mulshift_rows change together (not measured apart on real timing).
+- `emu/bench.py` cases 0 and 1 are now bp_dots (288 x 96, groups of 6) and
+  build_bptab 96; the real/Musashi ratios above are for the old routines.
 - Exact ideas left, each small: emb scores through bit planes (~1%, 9 KB
   copy), K/V cache in bit-plane layout (1.5-5%, grows with position).
 - **Fewer weight bits: measured, not adopted** (`scripts/quant_explore.py`,

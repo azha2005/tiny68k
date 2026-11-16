@@ -737,7 +737,8 @@ long tiny_kv_bytes(const u8 *blob)
 
 /* Reorders wq wk wv wo f1 for matmul_bp(), partly into the caller memory,
    and marks the blob ("T68C") so that a second tiny_init() on the same blob
-   and the same kv memory does not reorder it again. */
+   and the same kv memory does not reorder it again. The kv memory then holds
+   model data (the spilled planes): never clear or replace all of it. */
 const char *tiny_init(u8 *blob, long size, s8 *kv)
 {
     int l, k;

@@ -23,9 +23,10 @@ typedef unsigned short u16;
 typedef signed char s8;
 typedef unsigned char u8;
 
-void tab_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 cols,
-              __reg("d1") s32 *out, __reg("d2") s32 nblk);
-void build_tab(__reg("a0") const s16 *x, __reg("a1") s32 *tab, __reg("d0") s32 n);
+void bp_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 groups,
+             __reg("d1") s32 *out, __reg("d2") s32 nblk, __reg("d3") s32 bias,
+             __reg("d4") const u8 *spill);
+s32 build_bptab(__reg("a0") const s16 *x, __reg("a1") s32 *tab, __reg("d0") s32 n);
 void dots_i8_x16(__reg("a0") const s8 *w, __reg("a1") const s16 *x, __reg("d0") s32 cols,
                  __reg("d1") s32 *out, __reg("d2") s32 rows);
 void dots_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k,
@@ -35,16 +36,17 @@ void mulshift_rows(__reg("a0") s32 *out, __reg("a1") const u16 *mant, __reg("d0"
 
 #define NCASE 6
 static const char *const names[NCASE] = {
-    "tab_dots 288x96", "build_tab 96", "dots_i8_x16 96x96",
+    "bp_dots 288x96", "build_bptab 96", "dots_i8_x16 96x96",
     "sparse 96x(48/256)", "mulshift_rows 96", "idle C loop"
 };
 /* iterations per case: a few seconds each on a 7 MHz 68000 */
-const long bench_iters[NCASE] = { 24, 60, 40, 60, 1500, 400 };
+const long bench_iters[NCASE] = { 24, 1200, 40, 60, 1500, 400 };
 
 static s8 w8[288 * 256];
 static s16 x16[256];
 static s16 pairs[2 * 48];
-static s32 tab[96 * 256];
+static s32 tab[96 / 6 * 64];
+static u8 bpw[288 * 96], bps[288 * 96 / 3];     /* bit-plane bytes: 4 * (6 bits) */
 static s32 out[288];
 static u16 mant[96], shf[96];
 static u32 seed = 12345;
@@ -55,6 +57,8 @@ void bench_setup(void)
 {
     s32 i, k = 0;
     for (i = 0; i < 288L * 256; i++) w8[i] = (s8)(rnd() & 0xFF);
+    for (i = 0; i < 288L * 96; i++) bpw[i] = (u8)(rnd() & 0xFC);
+    for (i = 0; i < 288L * 96 / 3; i++) bps[i] = (u8)(rnd() & 0xFC);
     /* activations roughly like quantize16 output: a few large, most smaller */
     for (i = 0; i < 256; i++) {
         s32 v = (s32)(rnd() & 0x7FFF) >> (rnd() & 3);
@@ -72,8 +76,8 @@ void bench_run(int c, long n)
     volatile s32 v = 0;
     for (i = 0; i < n; i++) {
         switch (c) {
-        case 0: tab_dots((const u8 *)w8, tab, 96, out, 36); break;
-        case 1: build_tab(x16, tab, 96); break;
+        case 0: bp_dots(bpw, tab, 16, out, 36, 0, bps); break;
+        case 1: build_bptab(x16, tab, 96); break;
         case 2: dots_i8_x16(w8, x16, 96, out, 96); break;
         case 3: dots_i8_x16_sparse(w8, pairs, 48, out, 96, 256); break;
         case 4: { s32 r; for (r = 0; r < 96; r++) out[r] = (r + 1) << 12;

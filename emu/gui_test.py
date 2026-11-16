@@ -44,7 +44,7 @@ SHOT_BYTES = 6 + 3 * (8 + 2 * 16000) + 2 * 80 * 25
 
 
 def host_shot(flags, work, keys=None):
-    exe = os.path.join(ROOT, "tinyui" + (".exe" if os.name == "nt" else ""))
+    exe = os.path.join(ROOT, "build", "tinyui" + (".exe" if os.name == "nt" else ""))
     if not os.path.exists(exe):
         sys.exit("missing tinyui: run python build.py gui-host")
     shutil.copyfile(os.path.join(ROOT, "tiny.t68"), os.path.join(work, "tiny.t68"))
@@ -65,7 +65,7 @@ def R_env():
 
 
 def build_disk(flags, redirect=""):
-    for f in ("tinygui", "tiny.t68"):
+    for f in (os.path.join("build", "tinygui"), "tiny.t68"):
         if not os.path.exists(os.path.join(ROOT, f)):
             sys.exit(f"missing {f}: run python build.py gui / convert")
     tmp = tempfile.mkdtemp()
@@ -76,7 +76,7 @@ def build_disk(flags, redirect=""):
         os.remove(R.ADF)
     R.xdf(R.ADF, "create")
     R.xdf(R.ADF, "format", "TINYGUI", "ofs")
-    for f in ("tinygui", "tiny.t68"):
+    for f in (os.path.join("build", "tinygui"), "tiny.t68"):
         R.xdf(R.ADF, "write", os.path.join(ROOT, f))
     R.xdf(R.ADF, "makedir", "s")
     R.xdf(R.ADF, "write", ss, "s/startup-sequence")

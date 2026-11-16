@@ -34,14 +34,14 @@ EXE = os.path.join(G.BUILD, "bench68k")
 def build():
     os.makedirs(G.BUILD, exist_ok=True)
     mobj = os.path.join(G.BUILD, "matmul68k.o")
-    G.run(["vasmm68k_mot", "-quiet", "-Fhunk", "-m68000", "-no-opt", "matmul68k.s", "-o", mobj])
+    G.run(["vasmm68k_mot", "-quiet", "-Fhunk", "-m68000", "-no-opt", os.path.join("src", "matmul68k.s"), "-o", mobj])
     # AmigaDOS executable
-    G.run(["vc", "+kick13", "-c99", "-O2", "bench68k.c", mobj, "-o", EXE])
+    G.run(["vc", "+kick13", "-c99", "-O2", os.path.join("src", "bench68k.c"), mobj, "-o", EXE])
     # raw code for Musashi
     obj = os.path.join(G.BUILD, "bench_raw.o")
     out = os.path.join(G.BUILD, "bench_raw.bin")
     mp = os.path.join(G.BUILD, "bench_raw.map")
-    G.run(["vc", "+kick13", "-c99", "-O2", "-DBENCH_ENGINE_ONLY", "-c", "bench68k.c", "-o", obj])
+    G.run(["vc", "+kick13", "-c99", "-O2", "-DBENCH_ENGINE_ONLY", "-c", os.path.join("src", "bench68k.c"), "-o", obj])
     G.run(["vlink", "-brawbin1", "-Ttext", hex(G.BASE), "-M" + mp, "-o", out, obj, mobj,
            "-L" + os.path.join(G.VBCC, "targets", "m68k-kick13", "lib"), "-lvc"])
     syms = {}

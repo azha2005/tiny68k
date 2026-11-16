@@ -1,24 +1,72 @@
 # tiny68k: TINY 2.1 on an Amiga 500
 
-[TINY 2.1](https://github.com/WollyMonjac/Tiny-2.1) is a 367,000-parameter
-transformer that answers questions letter by letter, written for DOS and
-Turbo C with floating point. This project ports it to a 68000 at 7.09 MHz with
-no FPU, in integer arithmetic, using the method of `../amiga260k`.
+**tiny68k is a port of [TINY 2.1](https://github.com/WollyMonjac/Tiny-2.1)
+by [WollyMonjac](https://github.com/WollyMonjac).** TINY 2.1 is a
+367,000-parameter transformer that answers questions letter by letter. It was
+written for DOS and Turbo C with floating point, and it fits on a floppy disk.
+The model, its weights, its training and its interface design are
+WollyMonjac's work. This repository only brings them to a 7.09 MHz 68000 with
+no FPU, in integer arithmetic, on a stock Amiga 500 with Kickstart 1.2.
 
-Status: **stage 1 done**. The integer specification gives the same answers as
-the original on every test question. The C engine for the 68000 is next.
+[![tiny68k on a real Amiga 500](video/poster.jpg)](video/tiny68k_a500_60s.mp4)
+
+`video/tiny68k_a500_60s.mp4`: one minute on a real A500. The sped-up parts
+are marked on screen. In real time, "Lima." took 35.8 s with the screen off
+while it thinks, and "I am a tiny neural network." took 67.4 s with the
+screen on (both figures are from the program's own status line).
+
+## Status
+
+1. **Done**: float reference, `.t68` converter, integer specification
+   (`oracle_tiny.py`), accuracy gate. 44/44 greedy answers identical to TINY.C.
+2. **Done**: the C engine (`src/tiny68k.c`) and the bit-exactness gate.
+3. **Done**: the 68000 build with vbcc, checked in an emulated 68000 against
+   the specification, and run on Kickstart 1.2. Three optimisation rounds in
+   68000 assembly took "what is the capital of peru" from 130 s to 77 s
+   (cycle-exact WinUAE).
+4. **In progress**: TINY.C's interface on the A500 (hires, three themes on
+   F5, neural monitor), a fast prefill mode and a prefix cache. Sound is a
+   stub. See `docs/GUI.md`.
+
+![The three themes (F5)](docs/gui_themes.png)
+
+`AGENTS.md` has the full rules, measurements and history.
 
 ## Setup
 
-TINY 2.1 has no licence, so its files are not in this repo. Copy `TINY.C`,
-`TINY.BIN` and `README.TXT` from the upstream repository (commit in
-`orig/UPSTREAM_COMMIT`) into `orig/`, then:
+TINY 2.1 has no licence file, so its source and `TINY.BIN` are not in this
+repository. Get them from the upstream repository (the commit is in
+`orig/UPSTREAM_COMMIT`): copy `TINY.C`, `TINY.BIN` and `README.TXT` into
+`orig/`, then:
 
 ```
 python build.py ref        # the original TINY.C as a host tool
 python build.py convert    # TINY.BIN -> tiny.t68
-python build.py check      # both stage 1 gates
+python build.py check      # float reference = TINY.C; integer oracle ~ float
+python build.py verify     # C engine == integer oracle, bit for bit
+python build.py amiga      # 68000 executable (vbcc +kick13, vasm) -> build/tiny68k
+python build.py gate       # vbcc-compiled 68000 code == oracle, in Musashi
+python build.py gui        # the Amiga interface -> build/tinygui
 ```
+
+`src/prefix_kv.h` is generated from TINY.BIN's weights (a key/value cache
+for common question openings) and is checked in so the engine builds.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `oracle_tiny.py`, `fx.py` | **the specification**: integer forward pass, Q16.16 primitives |
+| `ref_tiny.py`, `convert_tiny.py` | float reference and TINY.BIN reader; TINY.BIN -> `tiny.t68` |
+| `check_ref.py`, `cmp_fp32.py` | stage 1 gates |
+| `src/` | the engine (`tiny68k.c`, `matmul68k.s`) and the Amiga interface |
+| `scripts/` | `verify.py`, `m68k_gate.py`, `asm_unit.py`, profilers, experiments |
+| `emu/` | WinUAE tests on Kickstart 1.2 |
+| `intro/` | a standalone boot intro test |
+| `ref/` | harness around the unmodified TINY.C, its answers |
+| `docs/` | `GUI.md` and screenshots |
+| `video/` | the A500 video and the script that cut it |
+| `build/` | everything compiled (not in git) |
 
 ## The model
 
@@ -41,8 +89,10 @@ with one scale per vector.
   shift), so all of attention runs through the same kernel as the matmuls.
 - exp comes from a table in the model file, and `1/sqrt(24)` is a header
   constant.
+- On the 68000 the big matmuls use bit-plane lookup tables (T-MAC) instead of
+  MULS. The arithmetic stays exact, so the scores do not change.
 
-## Accuracy (stage 1)
+## Accuracy
 
 Over 44 questions and 772 answer positions with teacher forcing, compared to
 float:
@@ -54,10 +104,9 @@ float:
 | argmax agreement | 772/772 |
 | greedy answers identical to TINY.C | 44/44 |
 
-## Expected cost on the 68000
+## Credits
 
-353,376 int8 multiply-accumulates per letter, plus 768 per earlier letter in
-attention. That is about 3.9 s per letter at the start and about 4.5 s near
-the end of the context, or around 4 minutes per question and answer. These
-are estimates from the amiga260k kernel timings and have not been measured.
-Memory is about 470 KB, so it needs the 512 KB A501 expansion.
+- **TINY 2.1**: [WollyMonjac](https://github.com/WollyMonjac),
+  <https://github.com/WollyMonjac/Tiny-2.1>. Model, weights, training and the
+  original DOS program.
+- Amiga port, integer arithmetic and 68000 code: this repository.

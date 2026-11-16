@@ -1,5 +1,8 @@
 # TINY 2.1 on Amiga 500 (68000)
 
+TINY 2.1 is by WollyMonjac (https://github.com/WollyMonjac/Tiny-2.1). Keep
+that credit in the README and anywhere the port is shown.
+
 A port of TINY 2.1 (https://github.com/WollyMonjac/Tiny-2.1, a 367K-parameter
 letter-by-letter question-answering transformer for DOS) to a 7.09 MHz 68000
 with no FPU, in integer arithmetic. The method is copied from `../amiga260k`.
@@ -208,6 +211,11 @@ these still fit. The value-weight path assumes value absmax < 64.
 
 ## Files
 
+Layout: the Python specification and its gates at the top, C and asm in
+`src/`, everything compiled in `build/` (not in git), docs in `docs/`.
+Names in the rest of this file without a directory are in `src/` (C, asm)
+or at the top (Python).
+
 | File | Role |
 |---|---|
 | `orig/` | upstream TINY.C, TINY.BIN, README.TXT (not in git, no licence) |
@@ -219,17 +227,24 @@ these still fit. The value-weight path assumes value absmax < 64.
 | `oracle_tiny.py` | **the specification**: step(), pick(), think() |
 | `check_ref.py` | ref_tiny vs TINY.C |
 | `cmp_fp32.py` | oracle vs float, accuracy gate |
-| `tiny68k.c` | the engine (stage 2): step(), pick(), think(), plain-text UI |
+| `src/tiny68k.c` | the engine (stage 2): step(), pick(), think(), plain-text UI |
+| `src/prefix_kv.h` | exact K/V of common question openings, generated from TINY.BIN (in git by decision) |
+| `src/matmul68k.s` | 68000 hot routines: dot products, sparse dot, bit-plane tables, fxmul, mulshift, attention (register calls) |
+| `src/conio68k.*`, `src/render68k.*`, `src/tinyui.c`, `src/tui_*`, `src/tui68k.s` | the stage 4 GUI (see `docs/GUI.md`) |
+| `src/bench68k.c` | per-routine timing, used by `emu/bench.py` |
 | `scripts/verify.py` | **the gate**: C == oracle (scores, layer activity, answers) |
-| `GUI.md` | stage 4 plan: display, palettes, conio layer, sound, SMW lessons |
-| `matmul68k.s` | 68000 hot routines: dot products, sparse dot, column tables, fxmul, mulshift (register calls) |
 | `scripts/asm_unit.py` | each `matmul68k.s` routine vs its C fallback, register preservation |
 | `scripts/muls_bits.py` | MULS operand bit-transition statistics on real data |
 | `scripts/quant_explore.py` | experiment: fewer weight bits per tensor vs the accuracy bar |
 | `scripts/m68k_prof.py` | per-function cycle profile in Musashi |
 | `scripts/m68k_gate.py` | vbcc-compiled engine in Musashi/Unicorn == oracle, + cycles |
 | `emu/run_test.py` | the hunk executables in WinUAE, KS 1.2, 512K + 512K A501 |
-| `build.py` | `ref convert check host verify amiga amiga-c gate uae` |
+| `emu/gui_test.py`, `emu/play_gui.py` | tinygui in WinUAE vs the host; by hand |
+| `emu/make_intro_adf.py` | TINY disk with the AMIGA 500 intro (needs `../cd32intro` and `../tiny68k-emb-intro`) |
+| `intro/` | standalone boot intro test (own art, `mk_assets.py`) |
+| `docs/GUI.md` | stage 4 plan: display, palettes, conio layer, sound, SMW lessons |
+| `video/` | 60 s video on a real A500, and `make_video.py` that cut it |
+| `build.py` | `ref convert check host verify amiga amiga-c gate gui gui-host gui-uae gui-play uae` |
 
 ## Environment note
 
@@ -249,6 +264,6 @@ file tool.
 3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
    68000 gate in Musashi, executables on KS 1.2 in WinUAE.
    Optimisation rounds 1-3 done: "Lima." 130 -> 77 s cycle-exact.
-4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
+4. Amiga UI per `docs/GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

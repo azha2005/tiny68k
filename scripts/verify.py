@@ -51,7 +51,7 @@ def build():
     os.makedirs(outdir, exist_ok=True)
     exe = os.path.join(outdir, "tiny68k" + (".exe" if os.name == "nt" else ""))
     cmd = ["gcc", "-O2", "-Wall", "-Werror", "-DA5_HOST", "-o", exe,
-           os.path.join(ROOT, "tiny68k.c")]
+           os.path.join(ROOT, "src", "tiny68k.c")]
     r = subprocess.run(cmd, capture_output=True, text=True, env=env())
     if r.returncode != 0:
         die("BUILD FAILED\n" + r.stdout + r.stderr)

@@ -73,12 +73,12 @@ def build(kernel, extra=(), tag=""):
     mp = os.path.join(BUILD, f"eng_{kernel}{tag}.map")
     flags = (["-DUSE_ASM"] if kernel == "asm" else []) + list(extra)
     run(["vc", "+kick13", "-c99", "-O2", "-DTINY_ENGINE_ONLY"] + flags +
-        ["-c", "tiny68k.c", "-o", obj])
+        ["-c", os.path.join("src", "tiny68k.c"), "-o", obj])
     objs = [obj]
     if kernel == "asm":
         mobj = os.path.join(BUILD, "matmul68k.o")
         run(["vasmm68k_mot", "-quiet", "-Fhunk", "-m68000", "-no-opt",
-             "matmul68k.s", "-o", mobj])
+             os.path.join("src", "matmul68k.s"), "-o", mobj])
         objs.append(mobj)
     run(["vlink", "-brawbin1", "-Ttext", hex(BASE), "-M" + mp, "-o", out] + objs +
         ["-L" + os.path.join(VBCC, "targets", "m68k-kick13", "lib"), "-lvc"])

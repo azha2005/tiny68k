@@ -1,5 +1,6 @@
 # Upstream TINY 2.1 has no licence: keep its files and anything derived from
-# the weights out of git. See README.md for where to get them.
+# the weights out of git (one exception: src/prefix_kv.h, which the engine
+# needs to build). See README.md for where to get them.
 orig/*
 !orig/UPSTREAM_COMMIT
 *.t68
@@ -18,8 +19,7 @@ tinygui
 tinyui
 shot_*.bin
 shot_*.png
-gui_themes.png
-gui_amiga_winuae.png
 
 # intro test build output
 intro/intro
+video/*_hq.mp4

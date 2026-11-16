@@ -43,7 +43,7 @@ def xdf(adf, *cmds, check=True):
 
 
 def build_disk(exact, nq):
-    files = ["tiny68k", "tiny.t68"] + ([] if exact else ["tiny68k_c"])
+    files = [os.path.join("build", "tiny68k"), "tiny.t68"] +         ([] if exact else [os.path.join("build", "tiny68k_c")])
     for f in files:
         if not os.path.exists(os.path.join(ROOT, f)):
             sys.exit(f"missing {f}: run python build.py amiga / amiga-c / convert")

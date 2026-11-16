@@ -96,7 +96,7 @@ def main():
     if not os.path.exists(vasm):
         vasm = "vasmm68k_mot"
     subprocess.run([vasm, "-quiet", "-Fbin", "-m68000", "-no-opt", "-L", lst,
-                    os.path.join(G.ROOT, "matmul68k.s"), "-o", binf], check=True)
+                    os.path.join(G.ROOT, "src", "matmul68k.s"), "-o", binf], check=True)
     code = open(binf, "rb").read()
     sym = {}
     for ln in open(lst, errors="replace"):

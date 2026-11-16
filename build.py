@@ -5,13 +5,15 @@ build.py -- builds and checks for tiny68k. No shell required.
     python build.py ref        build ref/harness (the original TINY.C, float)
     python build.py convert    orig/TINY.BIN -> tiny.t68
     python build.py check      ref vs TINY.C, then oracle vs float (stage 1 gate)
-    python build.py host       build tiny68k (host, C kernel)
+    python build.py host       build build/tiny68k (host, C kernel)
     python build.py verify     scripts/verify.py: C == oracle, exactly
-    python build.py amiga      vbcc +kick13 executable, asm kernel -> tiny68k
-    python build.py amiga-c    same with the C kernel -> tiny68k_c
+    python build.py amiga      vbcc +kick13 executable, asm kernel -> build/tiny68k
+    python build.py amiga-c    same with the C kernel -> build/tiny68k_c
     python build.py gate       scripts/m68k_gate.py: vbcc 68000 code == oracle
-    python build.py gui        the GUI (tinyui.c, hardware takeover) -> tinygui
-    python build.py gui-host   the GUI on the host, drawing to files -> tinyui
+    python build.py gui        the GUI (tinyui.c, hardware takeover) -> build/tinygui
+    python build.py gui-host   the GUI on the host, drawing to files -> build/tinyui
+
+Sources are in src/; everything compiled goes to build/.
     python build.py gui-uae    emu/gui_test.py: tinygui in WinUAE vs the host
     python build.py gui-play   emu/play_gui.py: tinygui in WinUAE, to use by hand
     python build.py uae        emu/run_test.py: the executables in WinUAE
@@ -23,6 +25,8 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC = "src"
+BUILD = "build"
 EXE = ".exe" if os.name == "nt" else ""
 MSYS = r"C:\msys64\ucrt64\bin"
 
@@ -46,7 +50,16 @@ def vbcc(tool):
     return p if os.path.isfile(p) else tool
 
 
+def s(name):
+    return os.path.join(SRC, name)
+
+
+def b(name):
+    return os.path.join(BUILD, name)
+
+
 def run(cmd):
+    os.makedirs(os.path.join(ROOT, BUILD), exist_ok=True)
     print("+", " ".join(cmd))
     r = subprocess.run(cmd, cwd=ROOT, env=env())
     if r.returncode != 0:
@@ -66,36 +79,36 @@ def main():
         run([sys.executable, "convert_tiny.py", "orig/TINY.BIN", "tiny.t68"])
     elif what == "host":
         cc = shutil.which("gcc", path=env()["PATH"]) or "gcc"
-        run([cc, "-O2", "-Wall", "-DA5_HOST", "-o", "tiny68k" + EXE, "tiny68k.c"])
+        run([cc, "-O2", "-Wall", "-DA5_HOST", "-o", b("tiny68k" + EXE), s("tiny68k.c")])
     elif what == "verify":
         run([sys.executable, os.path.join("scripts", "verify.py")])
     elif what in ("amiga", "amiga-c"):
         asm = what == "amiga"
-        out = "tiny68k" if asm else "tiny68k_c"
+        out = b("tiny68k" if asm else "tiny68k_c")
         obj = out + ".o"
         run([vbcc("vc"), "+kick13", "-c99", "-O2"] + (["-DUSE_ASM"] if asm else []) +
-            ["-c", "tiny68k.c", "-o", obj])
+            ["-c", s("tiny68k.c"), "-o", obj])
         objs = [obj]
         if asm:
             run([vbcc("vasmm68k_mot"), "-quiet", "-Fhunk", "-m68000", "-no-opt",
-                 "matmul68k.s", "-o", "matmul68k.o"])
-            objs.append("matmul68k.o")
+                 s("matmul68k.s"), "-o", b("matmul68k.o")])
+            objs.append(b("matmul68k.o"))
         run([vbcc("vc"), "+kick13", "-o", out] + objs)
     elif what == "gui":
         for src in ("tiny68k", "conio68k", "render68k", "tinyui", "tui_amiga"):
             run([vbcc("vc"), "+kick13", "-c99", "-O2", "-DUSE_ASM", "-DTINY_ENGINE_ONLY",
-                 "-c", src + ".c", "-o", "g_" + src + ".o"])
+                 "-c", s(src + ".c"), "-o", b("g_" + src + ".o")])
         for src in ("matmul68k", "tui68k"):
             run([vbcc("vasmm68k_mot"), "-quiet", "-Fhunk", "-m68000", "-no-opt",
-                 src + ".s", "-o", src + ".o"])
-        run([vbcc("vc"), "+kick13", "-o", "tinygui",
-             "g_tiny68k.o", "g_conio68k.o", "g_render68k.o", "g_tinyui.o",
-             "g_tui_amiga.o", "matmul68k.o", "tui68k.o"])
+                 s(src + ".s"), "-o", b(src + ".o")])
+        run([vbcc("vc"), "+kick13", "-o", b("tinygui")] +
+            [b(o) for o in ("g_tiny68k.o", "g_conio68k.o", "g_render68k.o", "g_tinyui.o",
+                            "g_tui_amiga.o", "matmul68k.o", "tui68k.o")])
     elif what == "gui-host":
         cc = shutil.which("gcc", path=env()["PATH"]) or "gcc"
         run([cc, "-O2", "-Wall", "-Wno-format-overflow", "-DA5_HOST", "-DTINY_ENGINE_ONLY",
-             "-o", "tinyui" + EXE, "tiny68k.c", "conio68k.c", "render68k.c", "tinyui.c",
-             "tui_host.c"])
+             "-o", b("tinyui" + EXE)] +
+            [s(f) for f in ("tiny68k.c", "conio68k.c", "render68k.c", "tinyui.c", "tui_host.c")])
     elif what == "gui-play":
         run([sys.executable, os.path.join("emu", "play_gui.py")] + sys.argv[2:])
     elif what == "gui-uae":

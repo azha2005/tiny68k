@@ -19,8 +19,8 @@ hard way.
 | `emu/gui_test.py` | `tinygui /dump1` in WinUAE; its screen must equal the host's byte for byte |
 | `scripts/shot_png.py` | shot file -> one PNG per theme |
 
-Build: `python build.py gui` (-> `tinygui`), `python build.py gui-host`
-(-> `tinyui`), test: `python build.py gui-uae [--exact] [--keys]`.
+Build: `python build.py gui` (-> `build/tinygui`), `python build.py gui-host`
+(-> `build/tinyui`), test: `python build.py gui-uae [--exact] [--keys]`.
 
 The UI uses its own random generator (`ui_rand`), and a `/dump` fixes the
 sampling seed, the clock (12:00) and the timing (0.0 s), so the screen after

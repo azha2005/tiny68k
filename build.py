@@ -13,6 +13,7 @@ build.py -- builds and checks for tiny68k. No shell required.
     python build.py gui        the GUI (tinyui.c, hardware takeover) -> tinygui
     python build.py gui-host   the GUI on the host, drawing to files -> tinyui
     python build.py gui-uae    emu/gui_test.py: tinygui in WinUAE vs the host
+    python build.py gui-play   emu/play_gui.py: tinygui in WinUAE, to use by hand
     python build.py uae        emu/run_test.py: the executables in WinUAE
                                (add --exact for cycle-exact timing)
 """
@@ -95,6 +96,8 @@ def main():
         run([cc, "-O2", "-Wall", "-Wno-format-overflow", "-DA5_HOST", "-DTINY_ENGINE_ONLY",
              "-o", "tinyui" + EXE, "tiny68k.c", "conio68k.c", "render68k.c", "tinyui.c",
              "tui_host.c"])
+    elif what == "gui-play":
+        run([sys.executable, os.path.join("emu", "play_gui.py")] + sys.argv[2:])
     elif what == "gui-uae":
         run([sys.executable, os.path.join("emu", "gui_test.py")] + sys.argv[2:])
     elif what == "gate":

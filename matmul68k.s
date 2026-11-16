@@ -16,7 +16,7 @@
 ;   s32 mulshift(d0 = acc, d1.w = m, d2 = sh)  (acc * m) >> sh, 48-bit exact
 ;   s32 build_bptab(a0 = const s16 *x, a1 = s32 *tab, d0 = n)
 ;   void bp_dots(a0 = const u8 *w, a1 = const s32 *tab, d0 = groups, d1 = s32 *out,
-;                d2 = nblk, d3 = bias)
+;                d2 = nblk, d3 = bias, d4 = const u8 *spill)
 ;
 ; Cost per MAC in dot_i8_x16, 68000 @ 7.09 MHz:
 ;     MOVE.B (A0)+,D1     8
@@ -517,12 +517,12 @@ _quantize16:
         rts
 
 ;-------------------------------------------------------------- build_bptab
-; T-MAC group tables: for each group of 8 inputs and every byte b,
-; tab[256 g + b] = sum of the inputs whose bit is set in b. In "ruler"
+; T-MAC group tables: for each group of 6 inputs and every 6-bit b,
+; tab[64 g + b] = sum of the inputs whose bit is set in b. In "ruler"
 ; order: T[b] = T[b-1] + D[ctz(b)], D[t] = x[t] - (x[0] + .. + x[t-1]),
-; D0..D6 in d0..d6, D7 in a2, fully unrolled: 20 cycles per entry, 32
-; entries per input. Returns the sum of all inputs.
-;   a0 = const s16 *x, a1 = s32 *tab, d0 = n (multiple of 8) -> d0 = sum x
+; D0..D5 in d0..d5, fully unrolled: 20 cycles per entry, 10.7 entries per
+; input. Returns the sum of all inputs.
+;   a0 = const s16 *x, a1 = s32 *tab, d0 = n (multiple of 6) -> d0 = sum x
 _build_bptab:
         movem.l d2-d7/a2-a4,-(sp)
         suba.l  a3,a3                   ; sum of x
@@ -563,403 +563,8 @@ _build_bptab:
         ext.l   d5
         adda.l  d5,a3
         sub.l   d7,d5                 ; D5 = x5 - P
-        add.l   d7,d7
-        add.l   d5,d7                 ; P += x5  (= 2P + D5)
-        move.w  (a0)+,d6
-        ext.l   d6
-        adda.l  d6,a3
-        sub.l   d7,d6                 ; D6 = x6 - P
-        add.l   d7,d7
-        add.l   d6,d7                 ; P += x6  (= 2P + D6)
-        movea.w (a0)+,a2
-        adda.l  a2,a3
-        suba.l  d7,a2                   ; D7 = x7 - P
         moveq   #0,d7
         move.l  d7,(a1)+                ; T[0] = 0
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d5,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d6,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d5,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   a2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d5,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d4,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d3,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d2,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d1,d7
-        move.l  d7,(a1)+
-        add.l   d0,d7
-        move.l  d7,(a1)+
-        add.l   d6,d7
-        move.l  d7,(a1)+
         add.l   d0,d7
         move.l  d7,(a1)+
         add.l   d1,d7
@@ -1094,20 +699,26 @@ _build_bptab:
 
 ;------------------------------------------------------------------ bp_dots
 ; Dots from bit-plane weights (tiny68k.c bitplane_blocks): per block of 8
-; rows, plane k = 7..0 of u = w ^ $80, group g, row r: one byte of 8 bits.
-;     acc = 2 acc + sum_g tab[256 g + byte]    (Horner over the planes)
+; rows, plane k = 7..0 of u = w ^ $80, group g of 6 columns, row r: one
+; byte holding 4 * (6 bits), a ready offset into the group's table.
+;     acc = 2 acc + sum_g tab[64 g + byte / 4]    (Horner over the planes)
 ;     out = acc - bias,  bias = 128 * sum(x)
-; Eight accumulators in d2-d7/a3/a4; the group loop is the old column loop:
-; moveq 4 + move.b 8 + 2 x add.w 8 + add.l d8(An,Xn) 20 = 40 cycles per byte.
-;   a0 = w, a1 = tab, d0 = groups, d1 = s32 *out, d2 = nblk, d3 = bias
+; Planes 7..2 of a block are at w, planes 1..0 at spill (they do not fit).
+; Eight accumulators in d2-d7/a3/a4. d1 keeps its upper 24 bits zero, so
+; MOVE.B alone makes the index: move.b 8 + add.l d8(An,Xn) 20 = 28 cycles
+; per byte (6 weights), against 40 per 8 with 256-entry tables.
+;   a0 = w, a1 = tab, d0 = groups, d1 = s32 *out, d2 = nblk, d3 = bias,
+;   d4 = spill
 _bp_dots:
         movem.l d2-d7/a2-a6,-(sp)
         move.l  d1,a5                   ; out
         move.l  d0,a6
         subq.l  #1,a6                   ; groups - 1, for dbra
+        move.l  d4,-(sp)                ; spill   12(sp)
         move.l  d3,-(sp)                ; bias    8(sp)
         move.l  d2,-(sp)                ; blocks  4(sp)
         subq.l  #4,sp                   ; planes  0(sp)
+        moveq   #0,d1                   ; index register, upper bits stay 0
 .blk:   moveq   #0,d2
         moveq   #0,d3
         moveq   #0,d4
@@ -1128,64 +739,50 @@ _bp_dots:
         move.l  a1,a2                   ; table of group 0
         move.w  a6,d0
 .grp:
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d2
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d3
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d4
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d5
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d6
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         add.l   0(a2,d1.w),d7
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         adda.l  0(a2,d1.w),a3
-        moveq   #0,d1
         move.b  (a0)+,d1
-        add.w   d1,d1
-        add.w   d1,d1
         adda.l  0(a2,d1.w),a4
-        lea     1024(a2),a2             ; next group's table
+        lea     256(a2),a2              ; next group's table
         dbra    d0,.grp
         subq.l  #1,(sp)
+        beq.s   .bend
+        moveq   #2,d0
+        cmp.l   (sp),d0
         bne     .pl
-        move.l  8(sp),d1                ; bias
-        sub.l   d1,d2
-        sub.l   d1,d3
-        sub.l   d1,d4
-        sub.l   d1,d5
-        sub.l   d1,d6
-        sub.l   d1,d7
-        suba.l  d1,a3
-        suba.l  d1,a4
+        move.l  a0,d0                   ; planes 1..0: from the spill area
+        move.l  12(sp),a0
+        move.l  d0,12(sp)
+        bra     .pl
+.bend:  move.l  a0,d0                   ; back to the next block in place
+        move.l  12(sp),a0
+        move.l  d0,12(sp)
+        move.l  8(sp),d0                ; bias
+        sub.l   d0,d2
+        sub.l   d0,d3
+        sub.l   d0,d4
+        sub.l   d0,d5
+        sub.l   d0,d6
+        sub.l   d0,d7
+        suba.l  d0,a3
+        suba.l  d0,a4
         movem.l d2-d7/a3-a4,(a5)        ; rows 0..7 in register order
         lea     32(a5),a5
         subq.l  #1,4(sp)
         bne     .blk
-        lea     12(sp),sp
+        lea     16(sp),sp
         movem.l (sp)+,d2-d7/a2-a6
         rts
 

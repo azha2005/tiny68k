@@ -105,9 +105,9 @@ letter is being computed (the UI is idle then), and take over the OS
 
 The network is causal, so each letter of the question can go through step()
 **while it is being typed**. Backspace rewinds the position and overwrites the
-cache. A prefill letter costs ~2.7 s on a real A500 and people type ~3
-letters a second, so this hides only the typing time (10-20 s of the ~73 s
-prefill of a 27-letter question), not the whole prefill. The numbers are unchanged: it is the same
+cache. A prefill letter costs ~2.0 s on a real A500 (round 3) and people
+type ~3 letters a second, so this hides only the typing time (10-20 s of the
+~54 s prefill of a 27-letter question), not the whole prefill. The numbers are unchanged: it is the same
 sequence of step() calls, and verify.py still covers it.
 
 Use `tiny_prefill()` for the typed letters (what `think()` does): it skips the

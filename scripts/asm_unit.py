@@ -211,19 +211,20 @@ def main():
     print(f"dot_i8_x16, dot_x16_i8s, dot_i8_x16_sparse: {nd} vectors each")
 
     def bitplanes(w, rows, cols):
-        """tiny68k.c bitplane_blocks(): rows x cols int8 (bytes) -> bp_dots layout"""
-        out = bytearray()
+        """tiny68k.c bitplane_blocks(): rows x cols int8 (bytes) -> (in place, spill)"""
+        main, spill = bytearray(), bytearray()
         for b in range(rows // 8):
             u = [[w[(8 * b + r) * cols + c] ^ 0x80 for c in range(cols)] for r in range(8)]
             for k in range(7, -1, -1):
-                for g in range(cols // 8):
+                for g in range(cols // 6):
                     for r in range(8):
-                        out.append(sum(((u[r][8 * g + i] >> k) & 1) << i for i in range(8)))
-        return bytes(out)
+                        v = sum(((u[r][6 * g + i] >> k) & 1) << i for i in range(6))
+                        (main if k >= 2 else spill).append(4 * v)
+        return bytes(main), bytes(spill)
 
     nt = max(n // 200, 30)
     for it in range(nt):
-        cols = 8 * rng.choice([1, 2, 12, rng.randint(1, 16)])
+        cols = 6 * rng.choice([1, 2, 16, rng.randint(1, 21)])
         nblk = rng.choice([1, 2, 12, rng.randint(1, 36)])
         if it % 2:      # extremes
             x = [rng.choice([0x7FFF, 0x8000, 0, 1, 0xFFFF]) for _ in range(cols)]
@@ -233,23 +234,26 @@ def main():
         TAB = 0x80000
         sx = call("_build_bptab", {R.A0: DATA_B, R.A1: TAB, R.D0: cols})
         check("build_bptab sum", sx, s32(sum(sx16(v) for v in x)), cols)
-        raw = cpu.read(TAB, 1024 * (cols // 8))
-        tab = [s32(int.from_bytes(raw[4 * i:4 * i + 4], "big")) for i in range(256 * (cols // 8))]
-        want_tab = [s32(sum(sx16(x[8 * g + i]) for i in range(8) if b >> i & 1))
-                    for g in range(cols // 8) for b in range(256)]
+        raw = cpu.read(TAB, 256 * (cols // 6))
+        tab = [s32(int.from_bytes(raw[4 * i:4 * i + 4], "big")) for i in range(64 * (cols // 6))]
+        want_tab = [s32(sum(sx16(x[6 * g + i]) for i in range(6) if b >> i & 1))
+                    for g in range(cols // 6) for b in range(64)]
         if tab != want_tab:
             check("build_bptab", 1, 0, cols)
             continue
         rows = 8 * nblk
         w = bytes(rng.getrandbits(8) for _ in range(rows * cols))
-        cpu.write(DATA_A, bitplanes(w, rows, cols))
+        main, spill = bitplanes(w, rows, cols)
+        assert len(main) == rows * cols and len(spill) == rows * cols // 3
+        SPILL = 0xC0000
+        cpu.write(DATA_A, main)
+        cpu.write(SPILL, spill)
         OUT = 0xB0000
         cpu.write(OUT, bytes(4 * rows))
         bias = s32(sx << 7)
-        call("_bp_dots", {R.A0: DATA_A, R.A1: TAB, R.D0: cols // 8, R.D1: OUT, R.D2: nblk,
-                          R.D3: bias})
-        got = rd32(OUT, rows) if False else [s32(int.from_bytes(cpu.read(OUT + 4 * r, 4), "big"))
-                                              for r in range(rows)]
+        call("_bp_dots", {R.A0: DATA_A, R.A1: TAB, R.D0: cols // 6, R.D1: OUT, R.D2: nblk,
+                          R.D3: bias, R.D4: SPILL})
+        got = [s32(int.from_bytes(cpu.read(OUT + 4 * r, 4), "big")) for r in range(rows)]
         for r in range(rows):
             want = s32(sum(sx8(w[r * cols + j]) * sx16(x[j]) for j in range(cols)))
             check("bp_dots", got[r], want, (cols, nblk, r))

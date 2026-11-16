@@ -115,10 +115,24 @@ Optimisation round 3 (2026-11-15), bit-exact, oracle untouched:
 - Musashi: "Lima." 88.3 -> **72.8 s**; 2.45 s full letter at position 0,
   1.93 s prefill letter. **Cycle-exact WinUAE, KS 1.2: 99.6 -> 82.0 s**
   (130.3 s before round 1). Real/Musashi 1.13.
-- Profile at position 0: bp_dots 61%, sparse f2 11%, mulshift_rows 6%,
-  fxcore 5%, dense dots (emb scores, keys) 4%, build_bptab 4%. Exact ideas
-  left, each small: emb scores through bit planes (~1%, 9 KB copy), K/V
-  cache in bit-plane layout (1.5-5%, grows with position), groups of 6.
+- Profile at position 0 then: bp_dots 61%, sparse f2 11%, mulshift_rows 6%,
+  fxcore 5%, dense dots (emb scores, keys) 4%, build_bptab 4%.
+- `fxcore` skips the two products of a zero high half (87% of fxmul calls
+  on real data have one, 30% both); `mulshift_rows` inlines the sh >= 16
+  path. Musashi "Lima." 72.8 -> 71.1 s.
+- **Groups of 6, not 8** (the layout described above is now this): the
+  weight byte holds 4 * (6 bits), a ready byte offset into a 64-entry
+  table, and d1 keeps its upper 24 bits zero, so the look-up is
+  `move.b (a0)+,d1` + `add.l 0(a2,d1.w),Dn`: 28 cycles per 6 weights
+  instead of moveq + 2 x add.w + ... = 40 per 8. Tables: 16 x 64 entries
+  (4 KB) instead of 12 x 256 (12 KB), a third of the build. Cost: 8 planes
+  of 6 bits take 4/3 of the int8 space; planes 7..2 stay in the block's own
+  bytes and planes 1..0 go to a spill area after the tables in the caller
+  memory (`tiny_kv_bytes`, +80 KB; `QT.spill`). Musashi "Lima." 71.1 ->
+  **67.8 s** (2.28 s full letter, 1.78 s prefill letter). **Cycle-exact
+  WinUAE, KS 1.2: 82.0 -> 76.9 s.**
+- Exact ideas left, each small: emb scores through bit planes (~1%, 9 KB
+  copy), K/V cache in bit-plane layout (1.5-5%, grows with position).
 - **Fewer weight bits: measured, not adopted** (`scripts/quant_explore.py`,
   Python only, spec untouched). bp_dots cost is linear in planes, so b bits
   would save ~61% x (8-b)/8 at position 0 (estimate). But TINY is at its
@@ -226,7 +240,7 @@ file tool.
 2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
 3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
    68000 gate in Musashi, executables on KS 1.2 in WinUAE.
-   Optimisation rounds 1-3 done: "Lima." 130 -> 82 s cycle-exact.
+   Optimisation rounds 1-3 done: "Lima." 130 -> 77 s cycle-exact.
 4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

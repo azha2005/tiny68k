@@ -299,7 +299,7 @@ typedef struct {
     s32 *exp_tab, *g1, *g2, *gf;
     QT emb, pos;
     QT t[MAXL][NT];
-    int tab;                  /* wq wk wv f1 stored for matmul_tab() */
+    int tab;                  /* wq wk wv wo f1 stored as bit planes, matmul_bp() */
     u8 *blob;
 } Model;
 
@@ -332,7 +332,7 @@ static const char *parse_model(Model *m, u8 *blob, long size)
     long l, k;
     m->blob = blob;
     if (size < 26 || blob[0] != 'T' || blob[1] != '6' || blob[2] != '8' ||
-        (blob[3] != 'A' && blob[3] != 'B') || be16(blob + 4) != 1)
+        (blob[3] != 'A' && blob[3] != 'C') || be16(blob + 4) != 1)
         return "not a version 1 .t68 file";
     m->D   = be16(m->blob + 6);
     m->L   = be16(m->blob + 8);
@@ -366,15 +366,15 @@ s32 dot_i8_x16(__reg("a0") const s8 *w, __reg("a1") const s16 *x, __reg("d0") s3
 s32 dot_x16_i8s(__reg("a0") const s16 *w, __reg("a1") const s8 *v, __reg("d0") s32 n,
                 __reg("d1") s32 stride);
 s32 dot_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k);
-void build_tab(__reg("a0") const s16 *x, __reg("a1") s32 *tab, __reg("d0") s32 n);
+s32 build_bptab(__reg("a0") const s16 *x, __reg("a1") s32 *tab, __reg("d0") s32 n);
 void dots_i8_x16(__reg("a0") const s8 *w, __reg("a1") const s16 *x, __reg("d0") s32 cols,
                  __reg("d1") s32 *out, __reg("d2") s32 rows);
 void dots_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k,
                         __reg("d1") s32 *out, __reg("d2") s32 rows, __reg("d3") s32 cols);
 void mulshift_rows(__reg("a0") s32 *out, __reg("a1") const u16 *mant, __reg("d0") s32 rows,
                    __reg("d1") s32 xsh, __reg("d2") const u16 *shift);
-void tab_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 cols,
-              __reg("d1") s32 *out, __reg("d2") s32 nblk);
+void bp_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 groups,
+             __reg("d1") s32 *out, __reg("d2") s32 nblk, __reg("d3") s32 bias);
 #else
 static s32 dot_i8_x16(const s8 *w, const s16 *x, s32 n)
 {
@@ -401,29 +401,43 @@ static s32 dot_i8_x16_sparse(const s8 *w, const s16 *pairs, s32 k)
     return acc;
 }
 
-/* For each of the n inputs x[j], the 256 products w * x[j] of every int8 w,
-   indexed by the weight's byte (u8)w: tab[256 j + (u8)w]. Additions only. */
-static void build_tab(const s16 *x, s32 *tab, s32 n)
+/* T-MAC style group tables (Wei et al., arXiv 2407.00088). For each group
+   of 8 inputs x[8g..8g+7] and every byte b: tab[256 g + b] = sum of the
+   x[8g+i] whose bit i is set in b. Built in "ruler" order, one addition per
+   entry: T[b] = T[b-1] + D[ctz(b)], D[t] = x[t] - (x[0] + .. + x[t-1]).
+   Returns the sum of all n inputs (for the bias of bp_dots). n % 8 == 0. */
+static s32 build_bptab(const s16 *x, s32 *tab, s32 n)
 {
-    s32 j, i, v, a;
-    for (j = 0; j < n; j++) {
-        v = x[j];
-        for (a = 0, i = 0; i < 128; i++, a += v) *tab++ = a;      /* w = 0..127 */
-        for (a = -a, i = 0; i < 128; i++, a += v) *tab++ = a;     /* w = -128..-1 */
+    s32 g, b, t, sum = 0, d[8], p;
+    for (g = 0; g < n; g += 8, x += 8, tab += 256) {
+        for (p = 0, t = 0; t < 8; t++) { d[t] = x[t] - p; p += x[t]; }
+        sum += p;
+        tab[0] = 0;
+        for (b = 1; b < 256; b++) {
+            for (t = 0; !(b & (1 << t)); t++) ;
+            tab[b] = tab[b - 1] + d[t];
+        }
     }
+    return sum;
 }
 
-/* Raw dots of nblk blocks of TB rows, weights stored column-major inside each
-   block (w[TB j + r], see transpose_blocks()): out[r] = sum_j tab[256 j + w]. */
-static void tab_dots(const u8 *w, const s32 *tab, s32 cols, s32 *out, s32 nblk)
+/* Raw dots of nblk blocks of 8 rows from bit-plane weights (bitplane_blocks):
+   with u = w + 128 (the byte w ^ 0x80), dot = sum_k 2^k S_k - 128 sum(x),
+   S_k = sum over groups of tab[256 g + (byte of bit k of u, 8 columns)].
+   Horner over the planes, 7 first; bias = 128 sum(x). Exact mod 2^32. */
+static void bp_dots(const u8 *w, const s32 *tab, s32 groups, s32 *out, s32 nblk, s32 bias)
 {
-    s32 acc[8], j, r;
+    u32 acc[8];
+    s32 k, g, r;
     const s32 *t;
     for (; nblk > 0; nblk--, out += 8) {
         for (r = 0; r < 8; r++) acc[r] = 0;
-        for (j = 0, t = tab; j < cols; j++, t += 256)
-            for (r = 0; r < 8; r++) acc[r] += t[*w++];
-        for (r = 0; r < 8; r++) out[r] = acc[r];
+        for (k = 0; k < 8; k++) {
+            for (r = 0; r < 8; r++) acc[r] += acc[r];
+            for (g = 0, t = tab; g < groups; g++, t += 256)
+                for (r = 0; r < 8; r++) acc[r] += (u32)t[*w++];
+        }
+        for (r = 0; r < 8; r++) out[r] = (s32)(acc[r] - (u32)bias);
     }
 }
 
@@ -455,33 +469,46 @@ static void matmul(const QT *t, const s16 *x, int xsh, s32 *out)
     mulshift_rows(out, t->mant, t->rows, xsh, t->shift);
 }
 
-/* The column-table matmul. With the input x fixed, every product w * x[j]
-   is one of 256 values, so build_tab() computes them once per input and the
-   row dots become table look-ups and additions: no MULS. Used where the
-   rows sharing an input pay for the 256 entries per column (wk+wv+wq: 3 D
-   rows, f1: HID rows). The same integer sums as matmul(), so exact. */
-#define TB 8                                /* rows per block, = tab_dots */
-static s32 *ctab;                           /* D * 256, after the KV caches */
+/* The bit-plane table matmul (T-MAC). build_bptab() turns the int16 input
+   into one 256-entry table per group of 8 inputs; each row's dot is then 8
+   look-ups per 8 weights (one per bit plane) and additions: no MULS, and
+   the tables cost 32 entries per input instead of 256. The same integer
+   sums as matmul(), so exact. Rows in blocks of TB = 8 (bp_dots). */
+#define TB 8
+static s32 *ctab;                           /* D / 8 * 256 longs, after the KV caches */
+static s32 cbias;                           /* 128 * sum of the input of ctab */
 
-static void matmul_tab(const QT *t, int xsh, s32 *out)
+static void tab_input(const s16 *x, int n)
 {
-    tab_dots((const u8 *)t->w, ctab, t->cols, out, t->rows / TB);
+    cbias = (s32)((u32)build_bptab(x, ctab, n) << 7);
+}
+
+static void matmul_bp(const QT *t, int xsh, s32 *out)
+{
+    bp_dots((const u8 *)t->w, ctab, t->cols / 8, out, t->rows / TB, cbias);
     mulshift_rows(out, t->mant, t->rows, xsh, t->shift);
 }
 
-/* Reorder a table's weights, in place, to blocks of TB rows stored column by
-   column (what tab_dots() reads). Once, at load time. */
-static s8 tblk[TB * MAXHID];
-static void transpose_blocks(QT *t)
+/* Reorder a table's weights, in place, for bp_dots(): per block of 8 rows,
+   per bit plane k = 7..0 of u = w ^ 0x80, per group of 8 columns, per row:
+   one byte whose bit i is bit k of u[row][8g + i]. Same size. Once, at load. */
+static u8 tblk[TB * MAXHID];
+static void bitplane_blocks(QT *t)
 {
-    long b, base;
-    int r, j, cols = t->cols;
+    long b, base, o;
+    int r, k, g, i, cols = t->cols;
+    u8 *w = (u8 *)t->w, v;
     for (b = 0; b < t->rows / TB; b++) {
         base = b * TB * cols;
-        for (j = 0; j < TB * cols; j++) tblk[j] = t->w[base + j];
-        for (r = 0; r < TB; r++)
-            for (j = 0; j < cols; j++)
-                t->w[base + (long)j * TB + r] = tblk[(long)r * cols + j];
+        for (i = 0; i < TB * cols; i++) tblk[i] = (u8)(w[base + i] ^ 0x80);
+        o = base;
+        for (k = 7; k >= 0; k--)
+            for (g = 0; g < cols / 8; g++)
+                for (r = 0; r < TB; r++) {
+                    for (v = 0, i = 0; i < 8; i++)
+                        v |= (u8)(((tblk[(long)r * cols + 8 * g + i] >> k) & 1) << i);
+                    w[o++] = v;
+                }
     }
 }
 
@@ -568,9 +595,9 @@ static void step(const Model *m, int tok, int p, int full)
         rmsnorm(bh, bx, m->g1 + (long)l * D, D);
         sh = quantize16(bh, D, xq);
         if (m->tab) {
-            build_tab(xq, ctab, D);
-            matmul_tab(&t[T_WK], sh, bk);
-            matmul_tab(&t[T_WV], sh, bv);
+            tab_input(xq, D);
+            matmul_bp(&t[T_WK], sh, bk);
+            matmul_bp(&t[T_WV], sh, bv);
         } else {
             matmul(&t[T_WK], xq, sh, bk);
             matmul(&t[T_WV], xq, sh, bv);
@@ -578,18 +605,23 @@ static void step(const Model *m, int tok, int p, int full)
         scale_of(store_kv(bk, D, kc + KV(m, l, p)), m->kc_m, m->kc_s, &km[l][p], &ks[l][p]);
         scale_of(store_kv(bv, D, vc + KV(m, l, p)), m->vc_m, m->vc_s, &vm[l][p], &vs[l][p]);
         if (!full && l == m->L - 1) return;     /* prefill: nothing else is read */
-        if (m->tab) matmul_tab(&t[T_WQ], sh, bq);   /* ctab still holds xq's */
+        if (m->tab) matmul_bp(&t[T_WQ], sh, bq);    /* ctab still holds xq's */
         else        matmul(&t[T_WQ], xq, sh, bq);
 
         attention(m, l, p);
-        matmul_q(&t[T_WO], ba, bt);
+        if (m->tab) {
+            sh = quantize16(ba, D, xq);
+            tab_input(xq, D);
+            matmul_bp(&t[T_WO], sh, bt);
+        } else
+            matmul_q(&t[T_WO], ba, bt);
         for (j = 0; j < D; j++) bx[j] += bt[j];
 
         rmsnorm(bh, bx, m->g2 + (long)l * D, D);
         if (m->tab) {
             sh = quantize16(bh, D, xq);
-            build_tab(xq, ctab, D);
-            matmul_tab(&t[T_F1], sh, bm);
+            tab_input(xq, D);
+            matmul_bp(&t[T_F1], sh, bm);
         } else
             matmul_q(&t[T_F1], bh, bm);
         sum = 0;
@@ -680,14 +712,14 @@ static int think(const Model *m, const char *q, char *out, int creativity)
 static Model model;
 
 /* Caller memory: the key/value caches (2 * L * CTX * D bytes) followed by
-   the column tables of matmul_tab() (D * 256 longs). */
+   the group tables of matmul_bp() (D / 8 * 256 longs). */
 long tiny_kv_bytes(const u8 *blob)
 {
-    return 2L * be16(blob + 8) * CTX * be16(blob + 6) + 1024L * be16(blob + 6);
+    return 2L * be16(blob + 8) * CTX * be16(blob + 6) + 128L * be16(blob + 6);
 }
 
-/* Reorders wq wk wv f1 in the blob for matmul_tab() and marks the blob
-   ("T68B") so that a second tiny_init() on the same memory does not. */
+/* Reorders wq wk wv wo f1 in the blob for matmul_bp() and marks the blob
+   ("T68C") so that a second tiny_init() on the same memory does not. */
 const char *tiny_init(u8 *blob, long size, s8 *kv)
 {
     int l;
@@ -699,13 +731,14 @@ const char *tiny_init(u8 *blob, long size, s8 *kv)
     model.tab = model.D % TB == 0 && model.HID % TB == 0;
     if (model.tab && blob[3] == 'A') {
         for (l = 0; l < model.L; l++) {
-            transpose_blocks(&model.t[l][T_WQ]);
-            transpose_blocks(&model.t[l][T_WK]);
-            transpose_blocks(&model.t[l][T_WV]);
-            transpose_blocks(&model.t[l][T_F1]);
+            bitplane_blocks(&model.t[l][T_WQ]);
+            bitplane_blocks(&model.t[l][T_WK]);
+            bitplane_blocks(&model.t[l][T_WV]);
+            bitplane_blocks(&model.t[l][T_WO]);
+            bitplane_blocks(&model.t[l][T_F1]);
         }
-        blob[3] = 'B';
-    } else if (!model.tab && blob[3] == 'B')
+        blob[3] = 'C';
+    } else if (!model.tab && blob[3] == 'C')
         return "blob already reordered";
     return NIL;
 }

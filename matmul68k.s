@@ -14,9 +14,9 @@
 ;   s32 dot_i8_x16_sparse(a0 = const s8 *w, a1 = const s16 *pairs, d0 = k)
 ;   s32 fxmul(d0 = a, d1 = b)                  Q16.16 * Q16.16
 ;   s32 mulshift(d0 = acc, d1.w = m, d2 = sh)  (acc * m) >> sh, 48-bit exact
-;   void build_tab(a0 = const s16 *x, a1 = s32 *tab, d0 = n)
-;   void tab_dots(a0 = const u8 *w, a1 = const s32 *tab, d0 = cols, d1 = s32 *out,
-;                 d2 = nblk)
+;   s32 build_bptab(a0 = const s16 *x, a1 = s32 *tab, d0 = n)
+;   void bp_dots(a0 = const u8 *w, a1 = const s32 *tab, d0 = groups, d1 = s32 *out,
+;                d2 = nblk, d3 = bias)
 ;
 ; Cost per MAC in dot_i8_x16, 68000 @ 7.09 MHz:
 ;     MOVE.B (A0)+,D1     8
@@ -30,8 +30,8 @@
         XDEF    _dot_i8_x16_sparse
         XDEF    _fxmul
         XDEF    _mulshift
-        XDEF    _build_tab
-        XDEF    _tab_dots
+        XDEF    _build_bptab
+        XDEF    _bp_dots
         XDEF    _dots_i8_x16
         XDEF    _dots_i8_x16_sparse
         XDEF    _mulshift_rows
@@ -485,94 +485,598 @@ _quantize16:
         movem.l (sp)+,d2-d4
         rts
 
-;---------------------------------------------------------------- build_tab
-; For each of the n inputs v = x[j]: 256 longs, v * w for w = 0..127 then
-; w = -128..-1 (indexed by the weight's byte). Running sums, no multiply.
-; About 19 cycles per entry (MOVEM stores), 4.9K per column.
-_build_tab:
-        tst.l   d0
-        beq     .none
-        movem.l d2-d7/a2-a5,-(sp)
-        move.l  d0,-(sp)                ; columns left
-; Each column is filled backwards, 8 entries per MOVEM.L -(A1): the group
-; at entries 8g..8g+7 holds d0..d7 in ascending order. High half first
-; (entries 255..128 = w -1..-128), then the low half (127..0 = w 127..0).
-.col:   lea     1024(a1),a1             ; end of this column's table
-        lea     -512(a1),a4             ; end of the high half
-        move.w  (a0)+,d0
-        ext.l   d0
-        move.l  d0,a5                   ; v
+;-------------------------------------------------------------- build_bptab
+; T-MAC group tables: for each group of 8 inputs and every byte b,
+; tab[256 g + b] = sum of the inputs whose bit is set in b. In "ruler"
+; order: T[b] = T[b-1] + D[ctz(b)], D[t] = x[t] - (x[0] + .. + x[t-1]),
+; D0..D6 in d0..d6, D7 in a2, fully unrolled: 20 cycles per entry, 32
+; entries per input. Returns the sum of all inputs.
+;   a0 = const s16 *x, a1 = s32 *tab, d0 = n (multiple of 8) -> d0 = sum x
+_build_bptab:
+        movem.l d2-d7/a2-a4,-(sp)
+        suba.l  a3,a3                   ; sum of x
         move.l  d0,d1
-        lsl.l   #3,d1
-        move.l  d1,a2                   ; 8 v
-        lsl.l   #5,d1
-        move.l  d1,a3                   ; 256 v
-        move.l  a5,d7
-        neg.l   d7                      ; entries 248..255: -8v .. -1v
-        move.l  d7,d6
-        sub.l   a5,d6
-        move.l  d6,d5
-        sub.l   a5,d5
-        move.l  d5,d4
-        sub.l   a5,d4
-        move.l  d4,d3
-        sub.l   a5,d3
-        move.l  d3,d2
-        sub.l   a5,d2
-        move.l  d2,d1
-        sub.l   a5,d1
-        move.l  d1,d0
-        sub.l   a5,d0
-.hi:    movem.l d0-d7,-(a1)
-        sub.l   a2,d0
-        sub.l   a2,d1
-        sub.l   a2,d2
-        sub.l   a2,d3
-        sub.l   a2,d4
-        sub.l   a2,d5
-        sub.l   a2,d6
-        sub.l   a2,d7
-        cmpa.l  a4,a1
-        bne.s   .hi
-        add.l   a3,d0                   ; -136v.. -> 120v .. 127v
-        add.l   a3,d1
-        add.l   a3,d2
-        add.l   a3,d3
-        add.l   a3,d4
-        add.l   a3,d5
-        add.l   a3,d6
-        add.l   a3,d7
-        lea     -512(a4),a4             ; start of the column
-.lo:    movem.l d0-d7,-(a1)
-        sub.l   a2,d0
-        sub.l   a2,d1
-        sub.l   a2,d2
-        sub.l   a2,d3
-        sub.l   a2,d4
-        sub.l   a2,d5
-        sub.l   a2,d6
-        sub.l   a2,d7
-        cmpa.l  a4,a1
-        bne.s   .lo
-        lea     1024(a1),a1             ; next column's start
-        subq.l  #1,(sp)
-        bne     .col
-        addq.l  #4,sp
-        movem.l (sp)+,d2-d7/a2-a5
-.none:  rts
+        add.l   d1,d1
+        lea     0(a0,d1.l),a4           ; end of x
+        cmpa.l  a4,a0
+        beq     .done
+.grp:   move.w  (a0)+,d0
+        ext.l   d0
+        adda.l  d0,a3
+        move.l  d0,d7                   ; D0 = x0, P = x0
+        move.w  (a0)+,d1
+        ext.l   d1
+        adda.l  d1,a3
+        sub.l   d7,d1                 ; D1 = x1 - P
+        add.l   d7,d7
+        add.l   d1,d7                 ; P += x1  (= 2P + D1)
+        move.w  (a0)+,d2
+        ext.l   d2
+        adda.l  d2,a3
+        sub.l   d7,d2                 ; D2 = x2 - P
+        add.l   d7,d7
+        add.l   d2,d7                 ; P += x2  (= 2P + D2)
+        move.w  (a0)+,d3
+        ext.l   d3
+        adda.l  d3,a3
+        sub.l   d7,d3                 ; D3 = x3 - P
+        add.l   d7,d7
+        add.l   d3,d7                 ; P += x3  (= 2P + D3)
+        move.w  (a0)+,d4
+        ext.l   d4
+        adda.l  d4,a3
+        sub.l   d7,d4                 ; D4 = x4 - P
+        add.l   d7,d7
+        add.l   d4,d7                 ; P += x4  (= 2P + D4)
+        move.w  (a0)+,d5
+        ext.l   d5
+        adda.l  d5,a3
+        sub.l   d7,d5                 ; D5 = x5 - P
+        add.l   d7,d7
+        add.l   d5,d7                 ; P += x5  (= 2P + D5)
+        move.w  (a0)+,d6
+        ext.l   d6
+        adda.l  d6,a3
+        sub.l   d7,d6                 ; D6 = x6 - P
+        add.l   d7,d7
+        add.l   d6,d7                 ; P += x6  (= 2P + D6)
+        movea.w (a0)+,a2
+        adda.l  a2,a3
+        suba.l  d7,a2                   ; D7 = x7 - P
+        moveq   #0,d7
+        move.l  d7,(a1)+                ; T[0] = 0
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d5,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d6,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d5,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   a2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d5,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d6,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d5,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d4,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d3,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d2,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        add.l   d1,d7
+        move.l  d7,(a1)+
+        add.l   d0,d7
+        move.l  d7,(a1)+
+        cmpa.l  a4,a0
+        bne     .grp
+.done:  move.l  a3,d0
+        movem.l (sp)+,d2-d7/a2-a4
+        rts
 
-;----------------------------------------------------------------- tab_dots
-; nblk blocks of 8 rows; inside a block the weights are column-major
-; (w[8 j + r]). Eight accumulators in d2-d7/a3/a4, one table per column:
-;     out[r] = sum_j tab[256 j + w[8 j + r]]
-; Per MAC: moveq 4 + move.b 8 + 2 x add.w 8 + add.l d8(An,Xn) 20 = 40 cycles
-; (adda.l likewise), against ~76 for the MULS kernel.
-_tab_dots:
+;------------------------------------------------------------------ bp_dots
+; Dots from bit-plane weights (tiny68k.c bitplane_blocks): per block of 8
+; rows, plane k = 7..0 of u = w ^ $80, group g, row r: one byte of 8 bits.
+;     acc = 2 acc + sum_g tab[256 g + byte]    (Horner over the planes)
+;     out = acc - bias,  bias = 128 * sum(x)
+; Eight accumulators in d2-d7/a3/a4; the group loop is the old column loop:
+; moveq 4 + move.b 8 + 2 x add.w 8 + add.l d8(An,Xn) 20 = 40 cycles per byte.
+;   a0 = w, a1 = tab, d0 = groups, d1 = s32 *out, d2 = nblk, d3 = bias
+_bp_dots:
         movem.l d2-d7/a2-a6,-(sp)
         move.l  d1,a5                   ; out
         move.l  d0,a6
-        subq.l  #1,a6                   ; cols - 1, for dbra
-        move.l  d2,-(sp)                ; block counter
+        subq.l  #1,a6                   ; groups - 1, for dbra
+        move.l  d3,-(sp)                ; bias    8(sp)
+        move.l  d2,-(sp)                ; blocks  4(sp)
+        subq.l  #4,sp                   ; planes  0(sp)
 .blk:   moveq   #0,d2
         moveq   #0,d3
         moveq   #0,d4
@@ -581,9 +1085,19 @@ _tab_dots:
         moveq   #0,d7
         suba.l  a3,a3
         suba.l  a4,a4
-        move.l  a1,a2                   ; table of column 0
+        move.l  #8,(sp)
+.pl:    add.l   d2,d2
+        add.l   d3,d3
+        add.l   d4,d4
+        add.l   d5,d5
+        add.l   d6,d6
+        add.l   d7,d7
+        adda.l  a3,a3
+        adda.l  a4,a4
+        move.l  a1,a2                   ; table of group 0
         move.w  a6,d0
-.col:   moveq   #0,d1
+.grp:
+        moveq   #0,d1
         move.b  (a0)+,d1
         add.w   d1,d1
         add.w   d1,d1
@@ -623,13 +1137,24 @@ _tab_dots:
         add.w   d1,d1
         add.w   d1,d1
         adda.l  0(a2,d1.w),a4
-        lea     1024(a2),a2             ; next column's table
-        dbra    d0,.col
+        lea     1024(a2),a2             ; next group's table
+        dbra    d0,.grp
+        subq.l  #1,(sp)
+        bne     .pl
+        move.l  8(sp),d1                ; bias
+        sub.l   d1,d2
+        sub.l   d1,d3
+        sub.l   d1,d4
+        sub.l   d1,d5
+        sub.l   d1,d6
+        sub.l   d1,d7
+        suba.l  d1,a3
+        suba.l  d1,a4
         movem.l d2-d7/a3-a4,(a5)        ; rows 0..7 in register order
         lea     32(a5),a5
-        subq.l  #1,(sp)
+        subq.l  #1,4(sp)
         bne     .blk
-        addq.l  #4,sp
+        lea     12(sp),sp
         movem.l (sp)+,d2-d7/a2-a6
         rts
 

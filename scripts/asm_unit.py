@@ -104,7 +104,7 @@ def main():
         if m:
             sym[m.group(1)] = int(m.group(2), 16)
     need = ["_dot_i8_x16", "_dot_x16_i8s", "_dot_i8_x16_sparse", "_fxmul", "_mulshift",
-            "_build_tab", "_tab_dots", "_dots_i8_x16", "_dots_i8_x16_sparse",
+            "_build_bptab", "_bp_dots", "_dots_i8_x16", "_dots_i8_x16_sparse",
             "_mulshift_rows", "_fxdiv", "_quantize16", "_rms_apply", "_kv_quant"]
     if not all(n in sym for n in need):
         # fall back: find the labels in the listing's symbol table
@@ -210,9 +210,20 @@ def main():
                                         {R.A0: DATA_A, R.A1: DATA_B, R.D0: k}), want, (cols, k))
     print(f"dot_i8_x16, dot_x16_i8s, dot_i8_x16_sparse: {nd} vectors each")
 
+    def bitplanes(w, rows, cols):
+        """tiny68k.c bitplane_blocks(): rows x cols int8 (bytes) -> bp_dots layout"""
+        out = bytearray()
+        for b in range(rows // 8):
+            u = [[w[(8 * b + r) * cols + c] ^ 0x80 for c in range(cols)] for r in range(8)]
+            for k in range(7, -1, -1):
+                for g in range(cols // 8):
+                    for r in range(8):
+                        out.append(sum(((u[r][8 * g + i] >> k) & 1) << i for i in range(8)))
+        return bytes(out)
+
     nt = max(n // 200, 30)
     for it in range(nt):
-        cols = rng.choice([1, 8, 96, rng.randint(1, 128)])
+        cols = 8 * rng.choice([1, 2, 12, rng.randint(1, 16)])
         nblk = rng.choice([1, 2, 12, rng.randint(1, 36)])
         if it % 2:      # extremes
             x = [rng.choice([0x7FFF, 0x8000, 0, 1, 0xFFFF]) for _ in range(cols)]
@@ -220,25 +231,29 @@ def main():
             x = [rng.getrandbits(16) for _ in range(cols)]
         cpu.write(DATA_B, b"".join(v.to_bytes(2, "big") for v in x))
         TAB = 0x80000
-        call("_build_tab", {R.A0: DATA_B, R.A1: TAB, R.D0: cols})
-        raw = cpu.read(TAB, 1024 * cols)
-        tab = [s32(int.from_bytes(raw[4 * i:4 * i + 4], "big")) for i in range(256 * cols)]
-        want_tab = [sx8(b) * sx16(x[j]) for j in range(cols) for b in range(256)]
+        sx = call("_build_bptab", {R.A0: DATA_B, R.A1: TAB, R.D0: cols})
+        check("build_bptab sum", sx, s32(sum(sx16(v) for v in x)), cols)
+        raw = cpu.read(TAB, 1024 * (cols // 8))
+        tab = [s32(int.from_bytes(raw[4 * i:4 * i + 4], "big")) for i in range(256 * (cols // 8))]
+        want_tab = [s32(sum(sx16(x[8 * g + i]) for i in range(8) if b >> i & 1))
+                    for g in range(cols // 8) for b in range(256)]
         if tab != want_tab:
-            check("build_tab", 1, 0, cols)
+            check("build_bptab", 1, 0, cols)
             continue
-        w = bytes(rng.getrandbits(8) for _ in range(8 * cols * nblk))
-        cpu.write(DATA_A, w)
+        rows = 8 * nblk
+        w = bytes(rng.getrandbits(8) for _ in range(rows * cols))
+        cpu.write(DATA_A, bitplanes(w, rows, cols))
         OUT = 0xB0000
-        cpu.write(OUT, bytes(32 * nblk))
-        call("_tab_dots", {R.A0: DATA_A, R.A1: TAB, R.D0: cols, R.D1: OUT, R.D2: nblk})
-        raw = cpu.read(OUT, 32 * nblk)
-        for b in range(nblk):
-            for r in range(8):
-                got = s32(int.from_bytes(raw[4 * (8 * b + r):4 * (8 * b + r) + 4], "big"))
-                want = s32(sum(sx8(w[b * 8 * cols + 8 * j + r]) * sx16(x[j]) for j in range(cols)))
-                check("tab_dots", got, want, (cols, nblk, b, r))
-    print(f"build_tab + tab_dots: {nt} cases")
+        cpu.write(OUT, bytes(4 * rows))
+        bias = s32(sx << 7)
+        call("_bp_dots", {R.A0: DATA_A, R.A1: TAB, R.D0: cols // 8, R.D1: OUT, R.D2: nblk,
+                          R.D3: bias})
+        got = rd32(OUT, rows) if False else [s32(int.from_bytes(cpu.read(OUT + 4 * r, 4), "big"))
+                                              for r in range(rows)]
+        for r in range(rows):
+            want = s32(sum(sx8(w[r * cols + j]) * sx16(x[j]) for j in range(cols)))
+            check("bp_dots", got[r], want, (cols, nblk, r))
+    print(f"build_bptab + bp_dots: {nt} cases")
 
     for _ in range(n):
         a = edge32()

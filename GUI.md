@@ -101,6 +101,13 @@ cache. Since the question takes about half the time of an answer, this hides
 roughly two minutes per question. The numbers are unchanged: it is the same
 sequence of step() calls, and verify.py still covers it.
 
+Use `tiny_prefill()` for the typed letters (what `think()` does): it skips the
+last layer after K/V and the scores, ~20% cheaper per letter. It leaves
+`layer_act[L-1]` and `score[]` untouched, so the UI must not show those while
+the user types. `clean()` depends on the whole line (all CAPS -> lower): on
+Enter, compare the cleaned question with what was prefilled and re-run from
+the first differing position. The separator step (token 1) is a full step.
+
 ## 6. Verification
 
 1. The numerical engine stays behind `scripts/verify.py`. The UI never touches

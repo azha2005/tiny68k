@@ -144,6 +144,9 @@ static u16 isqrt32(u32 v)
     return (u16)(root >> 1);
 }
 
+#ifdef USE_ASM
+s32 fxdiv(__reg("d0") s32 a, __reg("d1") s32 b);              /* matmul68k.s */
+#else
 /* (a << 16) / b in Q16.16, restoring long division, no 64-bit type. */
 static s32 fxdiv(s32 a, s32 b)
 {
@@ -163,6 +166,7 @@ static s32 fxdiv(s32 a, s32 b)
     }
     return neg ? -(s32)q : (s32)q;
 }
+#endif
 
 static s32 fxrsqrt(s32 ss)
 {
@@ -187,6 +191,9 @@ static s32 fxexp_neg(const s32 *tab, s32 u)
     return a + (((b - a) * frac) >> 16);
 }
 
+#ifdef USE_ASM
+int quantize16(__reg("a0") const s32 *x, __reg("d0") int n, __reg("a1") s16 *out);
+#else
 /* s32 vector -> int16 with a power-of-two shift, truncating toward zero. */
 static int quantize16(const s32 *x, int n, s16 *out)
 {
@@ -198,6 +205,7 @@ static int quantize16(const s32 *x, int n, s16 *out)
         out[i] = (s16)(x[i] >= 0 ? (x[i] >> sh) : -((-x[i]) >> sh));
     return sh;
 }
+#endif
 
 /* big * (cm / 2^cs) as a (mantissa, shift) pair for mulshift. fx.scale_of. */
 static void scale_of(s32 big, u16 cm, u16 cs, u16 *m, s16 *sh)
@@ -211,6 +219,31 @@ static void scale_of(s32 big, u16 cm, u16 cs, u16 *m, s16 *sh)
     else                   { *m = (u16)(p >> 15); t = 15; }
     *sh = (s16)((int)cs - be - t);
 }
+
+#ifdef USE_ASM
+void kv_quant(__reg("a0") const s32 *v, __reg("d0") s32 n, __reg("a1") s8 *q, __reg("d1") s32 f);
+void rms_apply(__reg("a0") s32 *out, __reg("a1") const s32 *x, __reg("d0") s32 n,
+               __reg("d1") s32 inv, __reg("d2") const s32 *g);
+#else
+/* The loops of store_kv() and rmsnorm() (one asm call each on the Amiga). */
+static void kv_quant(const s32 *v, s32 n, s8 *q, s32 f)
+{
+    s32 i, a, t, r;
+    for (i = 0; i < n; i++) {
+        a = v[i] < 0 ? -v[i] : v[i];
+        t = fxmul(a, f);
+        r = (t + 0x8000L) >> 16;
+        if (r > 127) r = 127;
+        q[i] = (s8)(v[i] < 0 ? -r : r);
+    }
+}
+
+static void rms_apply(s32 *out, const s32 *x, s32 n, s32 inv, const s32 *g)
+{
+    s32 j;
+    for (j = 0; j < n; j++) out[j] = fxmul(g[j], fxmul(x[j], inv));
+}
+#endif
 
 /* y = x / sqrt(mean(x^2)) * g. fx.rmsnorm_tiny: squares of x >> k so that
  * |x| up to 32767.0 never overflows, no eps. */
@@ -233,24 +266,18 @@ static void rmsnorm(s32 *out, const s32 *x, const s32 *g, int n)
     inv = fxrsqrt((s32)mean);
     s = 8 - k - e;
     inv = s >= 0 ? (s32)((u32)inv << s) : inv >> (-s);
-    for (j = 0; j < n; j++) out[j] = fxmul(g[j], fxmul(x[j], inv));
+    rms_apply(out, x, n, inv, g);
 }
 
 /* TINY.C store(): int8, one absmax scale per vector. fx.store_kv. */
 static s32 store_kv(const s32 *v, int n, s8 *q)
 {
-    s32 big = 0, a, f, t, r;
+    s32 big = 0, a, f;
     int i;
     for (i = 0; i < n; i++) { a = v[i] < 0 ? -v[i] : v[i]; if (a > big) big = a; }
     if (big < 256) big = 256;
     f = fxdiv(127L << 16, big);
-    for (i = 0; i < n; i++) {
-        a = v[i] < 0 ? -v[i] : v[i];
-        t = fxmul(a, f);
-        r = (t + 0x8000L) >> 16;
-        if (r > 127) r = 127;
-        q[i] = (s8)(v[i] < 0 ? -r : r);
-    }
+    kv_quant(v, n, q, f);
     return big;
 }
 
@@ -340,6 +367,12 @@ s32 dot_x16_i8s(__reg("a0") const s16 *w, __reg("a1") const s8 *v, __reg("d0") s
                 __reg("d1") s32 stride);
 s32 dot_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k);
 void build_tab(__reg("a0") const s16 *x, __reg("a1") s32 *tab, __reg("d0") s32 n);
+void dots_i8_x16(__reg("a0") const s8 *w, __reg("a1") const s16 *x, __reg("d0") s32 cols,
+                 __reg("d1") s32 *out, __reg("d2") s32 rows);
+void dots_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k,
+                        __reg("d1") s32 *out, __reg("d2") s32 rows, __reg("d3") s32 cols);
+void mulshift_rows(__reg("a0") s32 *out, __reg("a1") const u16 *mant, __reg("d0") s32 rows,
+                   __reg("d1") s32 xsh, __reg("d2") const u16 *shift);
 void tab_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 cols,
               __reg("d1") s32 *out, __reg("d2") s32 nblk);
 #else
@@ -393,6 +426,24 @@ static void tab_dots(const u8 *w, const s32 *tab, s32 cols, s32 *out, s32 nblk)
         for (r = 0; r < 8; r++) out[r] = acc[r];
     }
 }
+
+/* A whole matmul's raw dots, row after row (one asm call in the Amiga build). */
+static void dots_i8_x16(const s8 *w, const s16 *x, s32 cols, s32 *out, s32 rows)
+{
+    for (; rows > 0; rows--, w += cols) *out++ = dot_i8_x16(w, x, cols);
+}
+
+static void dots_i8_x16_sparse(const s8 *w, const s16 *pairs, s32 k, s32 *out, s32 rows, s32 cols)
+{
+    for (; rows > 0; rows--, w += cols) *out++ = dot_i8_x16_sparse(w, pairs, k);
+}
+
+/* out[r] = mulshift(out[r], mant[r], shift[r] - xsh), in place. */
+static void mulshift_rows(s32 *out, const u16 *mant, s32 rows, s32 xsh, const u16 *shift)
+{
+    s32 r;
+    for (r = 0; r < rows; r++) out[r] = mulshift(out[r], mant[r], (int)shift[r] - xsh);
+}
 #endif
 
 static s16 xq[MAXHID];
@@ -400,10 +451,8 @@ static s16 xq[MAXHID];
 /* out = table * x, x given as int16 << xsh. */
 static void matmul(const QT *t, const s16 *x, int xsh, s32 *out)
 {
-    int r, cols = t->cols;
-    const s8 *w = t->w;
-    for (r = 0; r < t->rows; r++, w += cols)
-        out[r] = mulshift(dot_i8_x16(w, x, cols), t->mant[r], (int)t->shift[r] - xsh);
+    dots_i8_x16(t->w, x, t->cols, out, t->rows);
+    mulshift_rows(out, t->mant, t->rows, xsh, t->shift);
 }
 
 /* The column-table matmul. With the input x fixed, every product w * x[j]
@@ -416,10 +465,8 @@ static s32 *ctab;                           /* D * 256, after the KV caches */
 
 static void matmul_tab(const QT *t, int xsh, s32 *out)
 {
-    int r;
     tab_dots((const u8 *)t->w, ctab, t->cols, out, t->rows / TB);
-    for (r = 0; r < t->rows; r++)
-        out[r] = mulshift(out[r], t->mant[r], (int)t->shift[r] - xsh);
+    mulshift_rows(out, t->mant, t->rows, xsh, t->shift);
 }
 
 /* Reorder a table's weights, in place, to blocks of TB rows stored column by
@@ -449,12 +496,11 @@ static void matmul_q(const QT *t, const s32 *x, s32 *out)
 static s16 pairs[2 * MAXHID];
 static void matmul_q_sparse(const QT *t, const s32 *x, s32 *out)
 {
-    int r, j, k = 0, cols = t->cols, sh = quantize16(x, cols, xq);
-    const s8 *w = t->w;
+    int j, k = 0, cols = t->cols, sh = quantize16(x, cols, xq);
     for (j = 0; j < cols; j++)
         if (xq[j]) { pairs[2 * k] = (s16)j; pairs[2 * k + 1] = xq[j]; k++; }
-    for (r = 0; r < t->rows; r++, w += cols)
-        out[r] = mulshift(dot_i8_x16_sparse(w, pairs, k), t->mant[r], (int)t->shift[r] - sh);
+    dots_i8_x16_sparse(t->w, pairs, k, out, t->rows, cols);
+    mulshift_rows(out, t->mant, t->rows, sh, t->shift);
 }
 
 /* -------------------------------------------------------------- state */
@@ -501,8 +547,12 @@ static void attention(const Model *m, int l, int p)
     }
 }
 
-/* Feed letter `tok` at position `p`; fills score[] (Q16.16). oracle step(). */
-static void step(const Model *m, int tok, int p)
+/* Feed letter `tok` at position `p`; fills score[] (Q16.16). oracle step().
+   full = 0 is prefill, for question letters whose scores nobody reads: it
+   stops once the last layer has stored its key and value, so score[] and
+   layer_act[L-1] are left as they were. Everything a later step reads (the
+   KV caches) is identical to a full step's. */
+static void step(const Model *m, int tok, int p, int full)
 {
     int l, j, D = m->D;
     s32 sum;
@@ -521,14 +571,15 @@ static void step(const Model *m, int tok, int p)
             build_tab(xq, ctab, D);
             matmul_tab(&t[T_WK], sh, bk);
             matmul_tab(&t[T_WV], sh, bv);
-            matmul_tab(&t[T_WQ], sh, bq);
         } else {
             matmul(&t[T_WK], xq, sh, bk);
             matmul(&t[T_WV], xq, sh, bv);
-            matmul(&t[T_WQ], xq, sh, bq);
         }
         scale_of(store_kv(bk, D, kc + KV(m, l, p)), m->kc_m, m->kc_s, &km[l][p], &ks[l][p]);
         scale_of(store_kv(bv, D, vc + KV(m, l, p)), m->vc_m, m->vc_s, &vm[l][p], &vs[l][p]);
+        if (!full && l == m->L - 1) return;     /* prefill: nothing else is read */
+        if (m->tab) matmul_tab(&t[T_WQ], sh, bq);   /* ctab still holds xq's */
+        else        matmul(&t[T_WQ], xq, sh, bq);
 
         attention(m, l, p);
         matmul_q(&t[T_WO], ba, bt);
@@ -609,14 +660,14 @@ void (*tiny_on_letter)(int c);
 static int think(const Model *m, const char *q, char *out, int creativity)
 {
     int p = 0, n = 0, tok;
-    for (; q[p]; p++) step(m, q[p] - 30, p);
-    step(m, 1, p++);
+    for (; q[p]; p++) step(m, q[p] - 30, p, 0);     /* prefill */
+    step(m, 1, p++, 1);                              /* its scores pick letter 1 */
     for (; p < CTX; p++) {
         tok = pick(m, creativity);
         if (tok <= 1) break;
         out[n++] = (char)(tok + 30);
         if (tiny_on_letter) tiny_on_letter(tok + 30);
-        step(m, tok, p);
+        step(m, tok, p, 1);
     }
     out[n] = 0;
     return n;
@@ -659,7 +710,8 @@ const char *tiny_init(u8 *blob, long size, s8 *kv)
     return NIL;
 }
 
-void tiny_step(int tok, int p) { step(&model, tok, p); }
+void tiny_step(int tok, int p) { step(&model, tok, p, 1); }
+void tiny_prefill(int tok, int p) { step(&model, tok, p, 0); }
 
 int tiny_think(const char *q, char *out, int creativity, u32 seed)
 {
@@ -729,16 +781,21 @@ static const char *load_model(const char *path)
     return tiny_init(blob, size, kv);
 }
 
-static int dump(const Model *m, const char *q, const char *a)
+/* Scores and layer activity per position. pre = 1 feeds the question
+   through the prefill path and prints only from the separator on: those
+   scores depend on the KV caches that prefill wrote. */
+static int dump(const Model *m, const char *q, const char *a, int pre)
 {
     char buf[CTX + 2];
-    int n = 0, p, i, tok;
+    int n = 0, p, i, tok, nq;
     while (*q && n < CTX) buf[n++] = *q++;
+    nq = n;
     if (n < CTX) buf[n++] = '\n';
     while (*a && n < CTX) buf[n++] = *a++;
     for (p = 0; p < n; p++) {
         tok = buf[p] == '\n' ? 1 : buf[p] - 30;
-        step(m, tok, p);
+        step(m, tok, p, !(pre && p < nq));
+        if (pre && p < nq) continue;
         for (i = 0; i < VOCAB; i++) printf("%ld\n", (long)score[i]);
         for (i = 0; i < m->L; i++) printf("%ld\n", (long)layer_act[i]);
     }
@@ -758,9 +815,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) creativity = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seed = (u32)atol(argv[++i]);
         else if (!strcmp(argv[i], "-ask")) ask = 1;
-        else if (!strcmp(argv[i], "-dump") && i + 2 < argc) {
+        else if ((!strcmp(argv[i], "-dump") || !strcmp(argv[i], "-dumppre")) && i + 2 < argc) {
             if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
-            return dump(&model, argv[i + 1], argv[i + 2]);
+            return dump(&model, argv[i + 1], argv[i + 2], argv[i][5] == 'p');
         }
     }
     if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }

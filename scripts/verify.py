@@ -103,6 +103,29 @@ def main():
     print(f"scores: {total} values over {len(PROBES)} probes"
           + ("" if fails else ", all identical"))
 
+    # 1b. the same probes with the question fed through the prefill path:
+    # every score from the separator on depends on the KV caches prefill wrote.
+    pfails = 0
+    for q, a in PROBES:
+        st = O.State(m)
+        text = [ord(c) - 30 for c in q] + [1] + [ord(c) - 30 for c in a]
+        py = []
+        for p, t in enumerate(text):
+            sc = O.step(m, st, t, p)
+            if p >= len(q):
+                py += sc + list(st.layer_act)
+        c = c_run(exe, ["-dumppre", q, a]).split()
+        py = [str(v) for v in py]
+        if c != py:
+            bad = [i for i, (x, y) in enumerate(zip(c, py)) if x != y]
+            per = m.vocab + m.L
+            where = (f"first at answer position {bad[0] // per}" if bad
+                     else f"C {len(c)} values, oracle {len(py)}")
+            print(f"FAIL prefill {q!r}: {where}", file=sys.stderr)
+            pfails += 1
+    fails += pfails
+    print(f"prefill: {len(PROBES)} probes" + ("" if pfails else ", scores after the question identical"))
+
     # 2./3. answers
     qs = [clean(l) for l in open(os.path.join(ROOT, "questions.txt"))]
     qs = [q for q in qs if q]

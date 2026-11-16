@@ -55,6 +55,25 @@ def c_mulshift(acc, m, sh):
     return s32(-rl if neg else rl)
 
 
+def c_fxdiv(a, b):
+    if b == 0:
+        return 0x7FFFFFFF
+    neg = (a < 0) ^ (b < 0)
+    ua = (-a) & M32 if a < 0 else a
+    ub = (-b) & M32 if b < 0 else b
+    q = ((ua << 16) // ub) & M32
+    return s32(-q if neg else q)
+
+
+def c_quantize16(x):
+    amax = max([((-v) & M32 if v < 0 else v) for v in x] or [0])
+    sh = 0
+    while (amax >> sh) > 32767:
+        sh += 1
+    out = [(v >> sh) & 0xFFFF if v >= 0 else (-((s32(-v)) >> sh)) & 0xFFFF for v in x]
+    return sh, out
+
+
 def sx8(b):
     return b - 256 if b & 0x80 else b
 
@@ -85,7 +104,8 @@ def main():
         if m:
             sym[m.group(1)] = int(m.group(2), 16)
     need = ["_dot_i8_x16", "_dot_x16_i8s", "_dot_i8_x16_sparse", "_fxmul", "_mulshift",
-            "_build_tab", "_tab_dots"]
+            "_build_tab", "_tab_dots", "_dots_i8_x16", "_dots_i8_x16_sparse",
+            "_mulshift_rows", "_fxdiv", "_quantize16", "_rms_apply", "_kv_quant"]
     if not all(n in sym for n in need):
         # fall back: find the labels in the listing's symbol table
         for ln in open(lst, errors="replace"):
@@ -219,6 +239,95 @@ def main():
                 want = s32(sum(sx8(w[b * 8 * cols + 8 * j + r]) * sx16(x[j]) for j in range(cols)))
                 check("tab_dots", got, want, (cols, nblk, b, r))
     print(f"build_tab + tab_dots: {nt} cases")
+
+    for _ in range(n):
+        a = edge32()
+        b = rng.choice([edge32(), rng.randint(1, 1 << 16), -0x80000000, 0x7FFFFFFF, 1, -1, 0])
+        check("fxdiv", call("_fxdiv", {R.D0: a, R.D1: b}), c_fxdiv(a, b), (a, b))
+    print(f"fxdiv: {n} cases")
+
+    for it in range(nd):
+        cnt = rng.choice([0, 1, 2, 96, 256, rng.randint(0, 300)])
+        mag = rng.choice([1 << 10, 1 << 15, 1 << 20, 1 << 31])
+        x = [rng.randint(-mag, mag - 1) for _ in range(cnt)]
+        if cnt and it % 5 == 0:
+            x[rng.randrange(cnt)] = rng.choice([-0x80000000, 0x7FFFFFFF, 32767, -32768, 32768])
+        cpu.write(DATA_A, b"".join((v & M32).to_bytes(4, "big") for v in x))
+        sh = call("_quantize16", {R.A0: DATA_A, R.D0: cnt, R.A1: DATA_B})
+        raw = cpu.read(DATA_B, 2 * cnt)
+        got = [int.from_bytes(raw[2 * i:2 * i + 2], "big") for i in range(cnt)]
+        wsh, want = c_quantize16(x)
+        check("quantize16 sh", sh, wsh, cnt)
+        check("quantize16 out", got, want, cnt)
+    print(f"quantize16: {nd} vectors")
+
+    for it in range(max(nd // 4, 50)):
+        cols, rows = rng.choice([(96, 96), (96, 97), (24, 5), (256, 96), (rng.randint(1, 300), rng.randint(1, 40))])
+        w = bytes(rng.getrandbits(8) for _ in range(rows * cols))
+        x = [rng.getrandbits(16) for _ in range(cols)]
+        cpu.write(DATA_A, w)
+        cpu.write(DATA_B, b"".join(v.to_bytes(2, "big") for v in x))
+        OUT = 0xB0000
+        call("_dots_i8_x16", {R.A0: DATA_A, R.A1: DATA_B, R.D0: cols, R.D1: OUT, R.D2: rows})
+        raw = cpu.read(OUT, 4 * rows)
+        for r in range(rows):
+            want = s32(sum(sx8(w[r * cols + j]) * sx16(x[j]) for j in range(cols)))
+            check("dots_i8_x16", s32(int.from_bytes(raw[4 * r:4 * r + 4], "big")), want, (cols, rows, r))
+        k = rng.randint(0, cols)
+        idx = sorted(rng.sample(range(cols), k))
+        val = [rng.getrandbits(16) for _ in range(k)]
+        cpu.write(DATA_B, b"".join(i.to_bytes(2, "big") + t.to_bytes(2, "big") for i, t in zip(idx, val)))
+        call("_dots_i8_x16_sparse", {R.A0: DATA_A, R.A1: DATA_B, R.D0: k, R.D1: OUT,
+                                     R.D2: rows, R.D3: cols})
+        raw = cpu.read(OUT, 4 * rows)
+        for r in range(rows):
+            want = s32(sum(sx8(w[r * cols + i]) * sx16(t) for i, t in zip(idx, val)))
+            check("dots_i8_x16_sparse", s32(int.from_bytes(raw[4 * r:4 * r + 4], "big")), want, (cols, k, r))
+        acc = [edge32() for _ in range(rows)]
+        mant = [rng.getrandbits(16) for _ in range(rows)]
+        xsh = rng.randint(-10, 20)
+        shf = [rng.randint(max(0, xsh - 15), xsh + 47) for _ in range(rows)]
+        cpu.write(OUT, b"".join((v & M32).to_bytes(4, "big") for v in acc))
+        cpu.write(DATA_A, b"".join(v.to_bytes(2, "big") for v in mant))
+        cpu.write(DATA_B, b"".join(v.to_bytes(2, "big") for v in shf))
+        call("_mulshift_rows", {R.A0: OUT, R.A1: DATA_A, R.D0: rows, R.D1: xsh, R.D2: DATA_B})
+        raw = cpu.read(OUT, 4 * rows)
+        for r in range(rows):
+            want = c_mulshift(acc[r], mant[r], shf[r] - xsh)
+            check("mulshift_rows", s32(int.from_bytes(raw[4 * r:4 * r + 4], "big")), want, (rows, r))
+    print("dots_i8_x16, dots_i8_x16_sparse, mulshift_rows: row loops")
+
+    def rd32(adr, k):
+        raw = cpu.read(adr, 4 * k)
+        return [s32(int.from_bytes(raw[4 * i:4 * i + 4], "big")) for i in range(k)]
+
+    def wr32(adr, vals):
+        cpu.write(adr, b"".join((v & M32).to_bytes(4, "big") for v in vals))
+
+    for it in range(nd):
+        k = rng.choice([0, 1, 96, rng.randint(0, 200)])
+        x = [edge32() for _ in range(k)]
+        g = [edge32() for _ in range(k)]
+        inv = edge32()
+        wr32(DATA_A, x)
+        wr32(DATA_B, g)
+        OUT = 0xB0000
+        call("_rms_apply", {R.A0: OUT, R.A1: DATA_A, R.D0: k, R.D1: inv, R.D2: DATA_B})
+        want = [c_fxmul(g[j], c_fxmul(x[j], inv)) for j in range(k)]
+        check("rms_apply", rd32(OUT, k), want, k)
+
+        f = rng.choice([edge32(), rng.randint(1, 127 << 16), 127 << 8])
+        wr32(DATA_A, x)
+        call("_kv_quant", {R.A0: DATA_A, R.D0: k, R.A1: OUT, R.D1: f})
+        got = list(cpu.read(OUT, k))
+        want = []
+        for v in x:
+            a = s32(-v) if v < 0 else v
+            r = s32(c_fxmul(a, f) + 0x8000) >> 16
+            r = min(r, 127)
+            want.append((-r if v < 0 else r) & 0xFF)
+        check("kv_quant", got, want, k)
+    print(f"rms_apply, kv_quant: {nd} vectors")
 
     if fails:
         print(f"FAIL: {fails} mismatches")

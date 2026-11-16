@@ -87,7 +87,7 @@ def build(kernel, extra=(), tag=""):
         m = re.match(r"\s+0x([0-9a-f]+) (_\w+): global", ln)
         if m:
             syms[m.group(2)] = int(m.group(1), 16)
-    need = ("_tiny_init", "_tiny_step", "_tiny_think", "_tiny_score",
+    need = ("_tiny_init", "_tiny_step", "_tiny_prefill", "_tiny_think", "_tiny_score",
             "_tiny_layer_act", "_tiny_kv_bytes")
     for s in need:
         if s not in syms:
@@ -202,6 +202,27 @@ def gate(kernel, engine, quick, oracle_probes, oracle_answers, qs, m):
             fails += 1
     print(f"  scores: {nval} values" + ("" if fails else ", all identical"))
 
+    # The question through tiny_prefill(), then full steps: every score from
+    # the separator on reads the KV caches that prefill wrote.
+    pre_cyc = {}
+    pfails = 0
+    per = m.vocab + m.L
+    for name, toks, want in probes:
+        nq = len(name)
+        for p, t in enumerate(toks):
+            if p < nq:
+                _, pre_cyc[p] = cpu.call(sy["_tiny_prefill"], t, p)
+                continue
+            cpu.call(sy["_tiny_step"], t, p)
+            got = [s32(v) for v in struct.unpack(f">{m.vocab}I", cpu.read(sy["_tiny_score"], 4 * m.vocab))]
+            got += [s32(v) for v in struct.unpack(f">{m.L}I", cpu.read(sy["_tiny_layer_act"], 4 * m.L))]
+            if got != want[p * per:(p + 1) * per]:
+                print(f"  FAIL prefill probe {name!r}: position {p} differs", file=sys.stderr)
+                pfails += 1
+                break
+    fails += pfails
+    print(f"  prefill: {len(probes)} probes" + ("" if pfails else ", scores after the question identical"))
+
     runs = [(0, 1, qs[:2 if quick else N_THINK])]
     if not quick:
         runs.append((THINK_SAMPLED[0], THINK_SAMPLED[1], qs[:2]))
@@ -224,6 +245,9 @@ def gate(kernel, engine, quick, oracle_probes, oracle_answers, qs, m):
         print(f"  cycles per letter (Musashi, no DMA waits): position {lo}: "
               f"{per_pos[lo]:,} = {per_pos[lo] / CPU_HZ:.2f} s;  position {hi}: "
               f"{per_pos[hi]:,} = {per_pos[hi] / CPU_HZ:.2f} s")
+        if pre_cyc:
+            print(f"  cycles per question letter (prefill): position 0: {pre_cyc[0]:,} = "
+                  f"{pre_cyc[0] / CPU_HZ:.2f} s")
     return fails, per_pos
 
 

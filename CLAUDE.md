@@ -61,6 +61,25 @@ transitions, the int16 activations 7.2 (MULS = 38+2n). Swapping operands
 would save only ~4% net (one more load) and Musashi does not model it, so it
 was not done; with the tables most MULS are gone anyway.
 
+Optimisation round 2 (2026-11-15), bit-exact, oracle untouched:
+- **Prefill** (`tiny_prefill`, `step(..., full=0)`): question letters stop
+  after the last layer has stored K/V; no wq/attention/wo/f1/f2 in that layer,
+  no scores. `think()` uses it for the question; the separator is a full
+  step. verify.py and m68k_gate.py feed each probe's question through it and
+  compare every later score (a mutation that skips the last V store fails).
+- asm `fxdiv` (bit-serial, 48 steps), `quantize16`, `kv_quant`, `rms_apply`,
+  and whole-matmul row loops (`dots_i8_x16`, `dots_i8_x16_sparse`,
+  `mulshift_rows`); `mulshift` fast path for sh >= 16 (88% of calls);
+  `build_tab` with MOVEM stores.
+- Musashi: 2.99 s full letter / 2.38 s prefill letter at position 0;
+  "what is the capital of peru" -> "Lima." 116.0 -> 88.3 s whole answer.
+  **Cycle-exact WinUAE, KS 1.2: 130.3 -> 100.8 s** (measured one step before
+  the last change). Real/Musashi stays ~1.13 for whole answers.
+- Profile now: tab_dots 41%, build_tab 16%, dense dots 16%, sparse f2 9%:
+  each near its 68000 floor for this method. Measured, not done: MULS
+  operand swap (~4% net on real HW only), tables for wo/emb/keys and nibble
+  tables (do not break even), word-sized weights (+209 KB for ~3.6%).
+
 WinUAE (`emu/run_test.py`): it used to wait for a `done.txt` that KS 1.2
 never wrote (no C: on the floppy, so no `echo`), and WinUAE throttled itself
 while its window was inactive. Now it ends when every output has its timing
@@ -154,8 +173,7 @@ file tool.
 2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
 3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
    68000 gate in Musashi, executables on KS 1.2 in WinUAE.
-   Optimisation round 1 done (3.29 s/letter at position 0 in Musashi).
-   Next: cycle-exact timing per letter in WinUAE (`--exact`).
+   Optimisation rounds 1-2 done: "Lima." 130 -> 101 s cycle-exact.
 4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

@@ -122,6 +122,28 @@ void font_finish(void)
 
 static int cur_x = -1, cur_y = -1;          /* where the cursor was drawn */
 
+#ifdef USE_ASM
+void render_row_asm(__reg("a0") unsigned char *p0,
+                    __reg("a1") unsigned char *p1,
+                    __reg("a2") const unsigned char *ch,
+                    __reg("a3") const unsigned char *at,
+                    __reg("a4") unsigned char *dirty,
+                    __reg("d0") const unsigned char *font,
+                    __reg("d1") const unsigned char *pentab,
+                    __reg("d2") int cur_col);
+
+static unsigned char pen_tab[NTHEME][256];
+static int pen_tab_ready;
+
+static void init_pen_tab(void)
+{
+    int t, a;
+    for (t = 0; t < NTHEME; t++)
+        for (a = 0; a < 256; a++)
+            pen_tab[t][a] = (unsigned char)theme_pens(t, a);
+    pen_tab_ready = 1;
+}
+#else
 static void cell(unsigned char *p0, unsigned char *p1, int theme, int x, int y, int under)
 {
     int pens = theme_pens(theme, con_at[y][x]), fg = pens & 3, bg = pens >> 2, r;
@@ -136,15 +158,35 @@ static void cell(unsigned char *p0, unsigned char *p1, int theme, int x, int y, 
         p1[o] = (unsigned char)((v & m1f) | (~v & m1b));
     }
 }
+#endif
 
 void render_flush(unsigned char *plane0, unsigned char *plane1, int theme,
                   int cursor_on, int cursor_x, int cursor_y)
 {
-    int x, y;
+    int y;
+#ifdef USE_ASM
+    long row_off;
+#else
+    int x;
+#endif
     if (!cursor_on) cursor_x = cursor_y = -1;
+    if (!con_ndirty && cur_x == cursor_x && cur_y == cursor_y) return;
+#ifdef USE_ASM
+    if (!pen_tab_ready) init_pen_tab();
+#endif
     if ((cur_x != cursor_x || cur_y != cursor_y) && cur_x >= 0)
         con_dirty[cur_y][cur_x] = con_rowdirty[cur_y] = 1;
     if (cursor_x >= 0) con_dirty[cursor_y][cursor_x] = con_rowdirty[cursor_y] = 1;
+#ifdef USE_ASM
+    for (y = 0, row_off = 0; y < SCRH; y++, row_off += 640) {
+        if (!con_rowdirty[y]) continue;
+        con_rowdirty[y] = 0;
+        render_row_asm(plane0 + row_off, plane1 + row_off,
+                       con_ch[y], con_at[y], con_dirty[y],
+                       (const unsigned char *)font8, pen_tab[theme],
+                       y == cursor_y ? cursor_x : -1);
+    }
+#else
     for (y = 0; y < SCRH; y++) {
         if (!con_rowdirty[y]) continue;
         con_rowdirty[y] = 0;
@@ -154,6 +196,7 @@ void render_flush(unsigned char *plane0, unsigned char *plane1, int theme,
                 con_dirty[y][x] = 0;
             }
     }
+#endif
     cur_x = cursor_x; cur_y = cursor_y;
     con_ndirty = 0;
 }

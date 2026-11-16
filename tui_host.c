@@ -81,12 +81,15 @@ void sys_theme(int t)
 }
 
 void sys_cursor(int on) { cursor_on = on; }
+void sys_compute(int on) { (void)on; }
+void sys_decode_band(int row) { (void)row; }
 
 static int next_key(int take)
 {
     static const struct { const char *name; int k; } named[] = {
         { "{ENTER}", K_ENTER }, { "{ESC}", K_ESC }, { "{BS}", K_BS }, { "{UP}", K_UP },
-        { "{F1}", K_F1 }, { "{F2}", K_F2 }, { "{F3}", K_F3 }, { "{F4}", K_F4 }, { "{F5}", K_F5 },
+        { "{F1}", K_F1 }, { "{F2}", K_F2 }, { "{F3}", K_F3 }, { "{F4}", K_F4 },
+        { "{F5}", K_F5 }, { "{F6}", K_F6 }, { "{F7}", K_F7 },
     };
     int i;
     if (!*keys) return -1;
@@ -106,7 +109,6 @@ static int next_key(int take)
    person types them later), only once the UI waits for a key. */
 int sys_kbhit(void)
 {
-    sys_flush();
     if (strncmp(keys, "{WAIT}", 6) == 0) return 0;
     return next_key(0) >= 0;
 }

@@ -43,6 +43,8 @@ typedef signed char s8;
 
 /* the engine (tiny68k.c built with -DTINY_ENGINE_ONLY) */
 extern s32 tiny_layer_act[];
+extern int tiny_fast_planes;
+extern int tiny_prefix_always;
 extern void (*tiny_on_letter)(int c);
 extern void (*tiny_on_step)(int i, int n);
 long tiny_kv_bytes(const u8 *blob);
@@ -118,6 +120,7 @@ static int clean(const char *line, char *q)
 #define C_HOT     12
 
 static int theme, sound_on = 1, voice_on = 1, demo, dump, dumpq = 4, shots, keytest;
+static int show_gen = 0, gen_band_y = -1;
 static int chat_x = 1, chat_y = 1;
 static char last_q[MAXQ + 1];
 static s32 act_max[MAXL];
@@ -136,6 +139,7 @@ static int key(void)
 }
 
 static void status_bar(const char *right);
+static void monitor_live(void);
 
 static void next_theme(void)
 {
@@ -143,12 +147,21 @@ static void next_theme(void)
     sys_theme(theme);
 }
 
-/* while the network works: F5 now, any other key kept for later */
+/* while the network works: F5/F7 now, any other key kept for later */
 static void poll_keys(void)
 {
     while (sys_kbhit()) {
         int k = sys_getch();
         if (k == K_F5) next_theme();
+        else if (k == K_F7) {
+            show_gen = !show_gen;
+            if (show_gen) sys_compute(0);
+            else if (prefill) sys_compute(1);
+            else if (gen_band_y >= 0) sys_decode_band(gen_band_y);
+            monitor_live();
+            status_bar(show_gen ? "screen ON" : "screen OFF");
+            sys_flush();
+        }
         else if (pend < 0) pend = k;
     }
 }
@@ -339,7 +352,7 @@ static void monitor_static(void)
 static void monitor_live(void)
 {
     int l, v, i;
-    char buf[20];
+    char buf[24];
     full();
     for (l = 0; l < L && l < 6; l++) {
         s32 a = tiny_layer_act[l];
@@ -364,7 +377,11 @@ static void monitor_live(void)
     }
     sprintf(buf, "%ld.%ld letters/s  ", speed10 / 10, speed10 % 10);
     put_at(MON_X, 15, C_TEXT, buf);
-    sprintf(buf, "creativity %d     ", creativity);
+    put_at(MON_X, 18, C_TEXT, show_gen ? "F7:screen ON      " : "F7:screen OFF(dma)");
+    if (tiny_fast_planes == 8)
+        sprintf(buf, "creat %d   F6:exact", creativity);
+    else
+        sprintf(buf, "creat %d   F6:fast%d", creativity, tiny_fast_planes);
     put_at(MON_X, 20, C_TEXT, buf);
 }
 
@@ -383,7 +400,7 @@ static void frame(void)
     put_at(59, 22, C_FRAME2, "\xD1");
     put_at(59, 24, C_FRAME2, "\xCF");
     put_at(59, IN_Y, C_FRAME2, "\xB3");
-    put_at(62, IN_Y, C_DIM, "\x18 last  F5 theme");
+    put_at(61, IN_Y, C_DIM, "F5 col F6/F7 mode ");
     monitor_static();
     monitor_live();
     status_bar(NULL);
@@ -644,8 +661,8 @@ static void show_help(void)
         "     what is 7 times 8 \xFA spell elephant",
         "     which countries border estonia",
         "     how do you say thank you in spanish",
-        "F2 sound \xFA F3 voice \xFA F4 creativity \xFA F5 colours",
-        "\x18 last question \xFA Esc quit \xFA CLS clears",
+        "F2 snd \xFA F3 vox \xFA F4 creat \xFA F5 col \xFA F6 fast \xFA F7 scr",
+        "\x18 last \xFA Esc quit \xFA CLS \xFA /fast /fast 5 /screen",
         NULL
     };
     int i;
@@ -689,8 +706,8 @@ static void ui_step(int i, int n)
     spin++;
     prefill = 1;
     monitor_live();
-    if (i % 3 == 0) tone(2400 + (ui_rand() % 8) * 150, 3);
     sys_flush();
+    if (i % 3 == 0) tone(2400 + (ui_rand() % 8) * 150, 3);
     poll_keys();
 }
 
@@ -712,6 +729,8 @@ static void ui_letter(int c)
         putch(scr_prev);
     }
     ans_pos(ans_col, &x, &y);
+    gen_band_y = y - 1;
+    if (!show_gen) sys_decode_band(gen_band_y);
     if (c != ' ') {
         gotoxy(x, y);
         color(C_FRAME);
@@ -732,7 +751,7 @@ static void ui_letter(int c)
     }
     monitor_live();
     if (!voice_on) tone(900 + (c % 16) * 70, 6);
-    sys_flush();
+    else sys_flush();
     poll_keys();
 }
 
@@ -791,11 +810,15 @@ static void ask(const char *q)
     sys_flush();
     tiny_on_step = ui_step;
     tiny_on_letter = ui_letter;
+    gen_band_y = -1;
+    if (!show_gen) sys_compute(1);
     t0 = sys_ticks();
     letters = tiny_think(q, out, creativity, dump ? 2024UL : (u32)t0 ^ (u32)ui_rand());
+    gen_band_y = -1;
+    sys_compute(0);
     tenths = dump ? 0 : (sys_ticks() - t0) / 5;
     prefill = 0;
-    if (letters == 0) { ui_letter('.'); out[0] = '.'; out[1] = 0; letters = 1; }
+    if (letters == 0) { ui_letter('.'); out[0] = '.'; out[1] = 0; letters = 1; gen_band_y = -1; sys_compute(0); }
     ans_pos(ans_col - 1, &sx, &sy);
     gotoxy(sx, sy); color(C_ANSWER); putch(scr_prev);
     speed10 = tenths > 0 ? 100L * letters / tenths : 0;
@@ -829,6 +852,13 @@ static void draw_input(const char *buf, int n)
     gotoxy(5 + (n > w ? w : n), IN_Y);
 }
 
+static const char *mode_status(void)
+{
+    if (tiny_fast_planes == 6) return "fast6 (6-plane)";
+    if (tiny_fast_planes == 5) return "fast5 (5-plane)";
+    return "exact (8-plane)";
+}
+
 static int read_line(char *buf)
 {
     int n = 0, c;
@@ -859,6 +889,16 @@ static int read_line(char *buf)
             next_theme();
             status_bar(theme_name[theme]);
             snd_click();
+        } else if (c == K_F6) {
+            tiny_fast_planes = tiny_fast_planes == 8 ? 6 : tiny_fast_planes == 6 ? 5 : 8;
+            snd_click();
+            monitor_live();
+            status_bar(mode_status());
+        } else if (c == K_F7) {
+            show_gen = !show_gen;
+            snd_click();
+            monitor_live();
+            status_bar(show_gen ? "screen ON" : "screen OFF");
         } else if (c >= 32 && c <= 126) {
             if (n < MAXQ) { buf[n++] = (char)c; buf[n] = 0; snd_click(); }
             else snd_error();
@@ -899,6 +939,7 @@ static int ui_main(void)
     const char *err;
     int i, n;
 
+    tiny_prefix_always = 1;
     err = sys_init(theme);
     if (err) { printf("TINY: %s\n", err); return 1; }
     err = boot();
@@ -947,6 +988,39 @@ static int ui_main(void)
             continue;
         }
         if (is_word(q, "help")) { show_help(); continue; }
+        if (is_word(q, "/fast") || is_word(q, "/fast 5") || is_word(q, "/fast 6") || is_word(q, "/exact")) {
+            if (is_word(q, "/exact")) tiny_fast_planes = 8;
+            else if (is_word(q, "/fast 5")) tiny_fast_planes = 5;
+            else tiny_fast_planes = 6;
+            chat_win();
+            if (wherex() > 1) chat_nl();
+            chat_room(2);
+            color(C_PANEL);
+            cputs(tiny_fast_planes == 6 ? " FAST MODE (6-plane prefill) " :
+                  tiny_fast_planes == 5 ? " FAST MODE (5-plane prefill) " :
+                                          " EXACT MODE (8-plane) ");
+            chat_nl();
+            chat_save();
+            monitor_live();
+            status_bar(mode_status());
+            continue;
+        }
+        if (is_word(q, "/screen") || is_word(q, "/show") || is_word(q, "/hide")) {
+            if (is_word(q, "/show")) show_gen = 1;
+            else if (is_word(q, "/hide")) show_gen = 0;
+            else show_gen = !show_gen;
+            chat_win();
+            if (wherex() > 1) chat_nl();
+            chat_room(2);
+            color(C_PANEL);
+            cputs(show_gen ? " SCREEN ON (visible while generating) " :
+                             " SCREEN OFF (DMA off while generating) ");
+            chat_nl();
+            chat_save();
+            monitor_live();
+            status_bar(show_gen ? "screen ON" : "screen OFF");
+            continue;
+        }
         strcpy(last_q, q);
         ask(q);
     }
@@ -978,6 +1052,16 @@ int main(int argc, char **argv)
             dump = shots = 1;
         else if (is_word(argv[i], "/quiet") || is_word(argv[i], "-quiet"))
             sound_on = 0;
+        else if (is_word(argv[i], "/fast") || is_word(argv[i], "-fast") ||
+                 is_word(argv[i], "/fast6") || is_word(argv[i], "-fast6"))
+            tiny_fast_planes = 6;
+        else if (is_word(argv[i], "/fast5") || is_word(argv[i], "-fast5"))
+            tiny_fast_planes = 5;
+        else if (is_word(argv[i], "/exact") || is_word(argv[i], "-exact"))
+            tiny_fast_planes = 8;
+        else if (is_word(argv[i], "/screen") || is_word(argv[i], "-screen") ||
+                 is_word(argv[i], "/show") || is_word(argv[i], "-show"))
+            show_gen = 1;
         else if (is_word(argv[i], "/wb13")) theme = 0;
         else if (is_word(argv[i], "/wb20")) theme = 1;
         else if (is_word(argv[i], "/neon")) theme = 2;

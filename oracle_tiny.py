@@ -47,6 +47,26 @@ def matmul(t, xq, xsh):
     return [fx.ms(int(acc[r]), t.mant[r], t.shift[r] - xsh) for r in range(t.rows)]
 
 
+def matmul_bp(t, xq, xsh, planes=8):
+    """Bit-plane matmul: top `planes` of u = w + 128, exact at planes=8.
+
+    For planes < 8 (drop = 8 - planes), runs Horner over k = 7..drop,
+    shifts left by drop, and subtracts the exact integer midpoint bias
+    ((257 - (1 << drop)) * sum(xq)) >> 1.
+    """
+    if planes >= 8:
+        return matmul(t, xq, xsh)
+    drop = 8 - planes
+    u_top = ((t.w + 128) >> drop) << drop
+    acc_u = u_top @ xq
+    sum_x = chk(int(xq.sum()))
+    bias = chk(((257 - (1 << drop)) * sum_x) >> 1)
+    acc = acc_u - bias
+    if acc.size and (acc.max() >= S32 or acc.min() < -S32):
+        raise OverflowError("dot product exceeds s32")
+    return [fx.ms(int(acc[r]), t.mant[r], t.shift[r] - xsh) for r in range(t.rows)]
+
+
 class State:
     def __init__(self, m):
         L, C, D = m.L, m.ctx, m.D
@@ -88,9 +108,14 @@ def attention(m, st, l, q, p):
     return out
 
 
-def step(m, st, tok, p):
-    """Feed letter `tok` at position `p`; return VOCAB Q16.16 scores."""
+def step(m, st, tok, p, full=True, prefill_planes=8):
+    """Feed letter `tok` at position `p`; return VOCAB Q16.16 scores.
+
+    When full is False (prefill), stops after the last layer stores K/V and
+    uses `prefill_planes` (1..8) in matmul_bp for wq/wk/wv/wo/f1.
+    """
     D = m.D
+    planes = 8 if full else prefill_planes
     e, ps = m.emb, m.pos
     x = [chk(fx.ms(int(e.w[tok, j]), e.mant[tok], e.shift[tok] - 16)
              + fx.ms(int(ps.w[p, j]), ps.mant[p], ps.shift[p] - 16))
@@ -101,9 +126,8 @@ def step(m, st, tok, p):
         h = fx.rmsnorm_tiny(x, m.g1[l])
         hq, hsh = fx.quantize16(h)
         hq = np.array(hq, dtype=np.int64)
-        k = matmul(ly["wk"], hq, hsh)
-        v = matmul(ly["wv"], hq, hsh)
-        q = matmul(ly["wq"], hq, hsh)
+        k = matmul_bp(ly["wk"], hq, hsh, planes)
+        v = matmul_bp(ly["wv"], hq, hsh, planes)
 
         kq, kbig = fx.store_kv(k)
         vq, vbig = fx.store_kv(v)
@@ -111,15 +135,18 @@ def step(m, st, tok, p):
         st.vc[l, p] = vq
         st.kscale[l][p] = fx.scale_of(kbig, m.kc_m, m.kc_s)
         st.vscale[l][p] = fx.scale_of(vbig, m.vc_m, m.vc_s)
+        if not full and l == m.L - 1:
+            return None
 
+        q = matmul_bp(ly["wq"], hq, hsh, planes)
         a = attention(m, st, l, q, p)
         aq, ash = fx.quantize16(a)
-        t = matmul(ly["wo"], np.array(aq, dtype=np.int64), ash)
+        t = matmul_bp(ly["wo"], np.array(aq, dtype=np.int64), ash, planes)
         x = [chk(x[j] + t[j]) for j in range(D)]
 
         h = fx.rmsnorm_tiny(x, m.g2[l])
         hq, hsh = fx.quantize16(h)
-        u = matmul(ly["f1"], np.array(hq, dtype=np.int64), hsh)
+        u = matmul_bp(ly["f1"], np.array(hq, dtype=np.int64), hsh, planes)
         u = [v if v > 0 else 0 for v in u]
         st.layer_act[l] = chk(sum(u)) // m.HID
         uq, ush = fx.quantize16(u)
@@ -166,14 +193,14 @@ def pick(m, score, creativity, rng):
     return best
 
 
-def think(m, question, creativity=0, seed=1, st=None):
+def think(m, question, creativity=0, seed=1, st=None, prefill_planes=8):
     """TINY.C think(): read the question, then letters until newline or CTX.
     `question` must already be clean (ref_tiny.clean)."""
     st = st if st is not None else State(m)
     rng = fx.XorShift32(seed)
     p = 0
     for c in question:
-        step(m, st, ord(c) - 30, p)
+        step(m, st, ord(c) - 30, p, full=False, prefill_planes=prefill_planes)
         p += 1
     score = step(m, st, 1, p)
     p += 1

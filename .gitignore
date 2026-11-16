@@ -20,3 +20,6 @@ shot_*.bin
 shot_*.png
 gui_themes.png
 gui_amiga_winuae.png
+
+# intro test build output
+intro/intro

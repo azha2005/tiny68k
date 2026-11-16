@@ -12,6 +12,8 @@
 #define K_F3    (256 + 61)
 #define K_F4    (256 + 62)
 #define K_F5    (256 + 63)
+#define K_F6    (256 + 64)
+#define K_F7    (256 + 65)
 #define K_UP    (256 + 72)
 
 const char *sys_init(int theme);   /* screen up, OS still running (file loading) */
@@ -20,8 +22,10 @@ void sys_done(void);
 void sys_flush(void);              /* draw what conio changed */
 void sys_theme(int theme);         /* new colours, whole screen redrawn */
 void sys_cursor(int on);
-int  sys_kbhit(void);              /* both flush first */
-int  sys_getch(void);              /* K_* or 32..126; waits */
+void sys_compute(int on);          /* reduce display DMA during heavy compute */
+void sys_decode_band(int row);     /* show only a 4-row band around 0-based row */
+int  sys_kbhit(void);
+int  sys_getch(void);              /* flushes first; K_* or 32..126; waits */
 long sys_ticks(void);              /* 1/50 s since start */
 void sys_delay(unsigned ms);       /* flushes, then waits */
 void sys_gettime(int *h, int *m);

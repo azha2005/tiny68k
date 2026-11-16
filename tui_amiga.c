@@ -74,15 +74,16 @@ extern volatile u8 kb_buf[64];
 extern volatile u16 kb_head, kb_tail;
 
 /* ---------------------------------------------------------- state */
-#define COP_WORDS 80                          /* 68 used, the last 2 the empty sprite */
-#define CHIP_BYTES (2L * PLANE_BYTES + 2L * COP_WORDS + 8)
+#define COP_WORDS 88                          /* 66 header + up to 18 split */
+#define CHIP_BYTES (2L * PLANE_BYTES + 4L * COP_WORDS + 4 + 8)
 static u8 *chip, *pl0, *pl1;
-static u16 *cop, *cop_colour;               /* the 4 colour values in the list */
+static u16 *cop[2], *null_spr;
+static int cop_cur, cop_col_off, cop_split_off, band_r0 = -1, band_r1 = -1;
 static void *gfx;
 static void *old_view, *old_lof, *old_shf;
 static u16 old_dmacon, old_intena;
 static void *old_vec2;
-static int phase, theme, cursor_on;
+static int phase, theme, cursor_on, compute;
 static u32 tod0;
 static long minute0;
 
@@ -104,16 +105,25 @@ static void wait_lines(long n)
     }
 }
 
+static void set_col0(u16 v)
+{
+    cop[0][cop_col_off] = v;
+    cop[1][cop_col_off] = v;
+}
+
 static void set_colours(const unsigned short *rgb)
 {
     int i;
-    for (i = 0; i < 4; i++) cop_colour[2 * i] = rgb[i];
+    for (i = 0; i < 4; i++) {
+        cop[0][cop_col_off + 2 * i] = rgb[i];
+        cop[1][cop_col_off + 2 * i] = rgb[i];
+    }
 }
 
-static void build_copper(void)
+static void build_copper(u16 *base)
 {
-    u16 *c = cop;
-    u32 a0 = (u32)pl0, a1 = (u32)pl1, ns = (u32)(cop + COP_WORDS - 2);
+    u16 *c = base;
+    u32 a0 = (u32)pl0, a1 = (u32)pl1, ns = (u32)null_spr;
     int i;
     *c++ = 0x0100; *c++ = 0xA200;           /* BPLCON0: hires, 2 planes, colour */
     *c++ = 0x0102; *c++ = 0x0000;
@@ -132,10 +142,10 @@ static void build_copper(void)
         *c++ = (u16)(0x0120 + 4 * i); *c++ = (u16)(ns >> 16);
         *c++ = (u16)(0x0122 + 4 * i); *c++ = (u16)ns;
     }
-    cop_colour = c + 1;
+    cop_col_off = (int)(c - base) + 1;
     for (i = 0; i < 4; i++) { *c++ = (u16)(0x0180 + 2 * i); *c++ = 0; }
+    cop_split_off = (int)(c - base);
     *c++ = 0xFFFF; *c++ = 0xFFFE;
-    cop[COP_WORDS - 2] = 0; cop[COP_WORDS - 1] = 0;     /* the empty sprite */
 }
 
 static const char *grab_topaz(void)
@@ -169,8 +179,13 @@ const char *sys_init(int t)
     if (!chip) return "not enough chip memory for the screen";
     pl0 = (u8 *)(((u32)chip + 7) & ~7UL);
     pl1 = pl0 + PLANE_BYTES;
-    cop = (u16 *)(pl1 + PLANE_BYTES);
-    build_copper();
+    cop[0] = (u16 *)(pl1 + PLANE_BYTES);
+    cop[1] = cop[0] + COP_WORDS;
+    null_spr = cop[1] + COP_WORDS;
+    null_spr[0] = 0; null_spr[1] = 0;
+    cop_cur = 0;
+    build_copper(cop[0]);
+    build_copper(cop[1]);
     set_colours(theme_rgb[theme]);
     dos_datestamp(DOSBase, d);
     minute0 = d->minute;
@@ -181,9 +196,9 @@ const char *sys_init(int t)
     gfx_loadview(gfx, NULL);
     gfx_waittof(gfx);
     gfx_waittof(gfx);
-    *(void **)((u8 *)gfx + GB_LOFLIST) = cop;          /* if the OS reloads it */
-    *(void **)((u8 *)gfx + GB_SHFLIST) = cop;
-    REG32(COP1LC) = (u32)cop;
+    *(void **)((u8 *)gfx + GB_LOFLIST) = cop[cop_cur];  /* if the OS reloads it */
+    *(void **)((u8 *)gfx + GB_SHFLIST) = cop[cop_cur];
+    REG32(COP1LC) = (u32)cop[cop_cur];
     REG16(COPJMP1) = 0;
     phase = 1;
     return NULL;
@@ -198,7 +213,7 @@ void sys_takeover(void)
     REG16(INTENA) = 0x7FFF;
     REG16(INTREQ) = 0x7FFF;
     REG16(DMACON) = 0x7FFF;
-    REG32(COP1LC) = (u32)cop;
+    REG32(COP1LC) = (u32)cop[cop_cur];
     REG16(COPJMP1) = 0;
     REG16(DMACON) = 0x83A0;                 /* MASTER | BPLEN | COPEN | SPREN: sprite
                                                DMA stays on so all 8 fetch the empty
@@ -217,6 +232,7 @@ void sys_takeover(void)
 void sys_done(void)
 {
     if (!phase) return;
+    sys_compute(0);
     sys_flush();
     if (phase == 2) {
         REG16(INTENA) = 0x7FFF;
@@ -254,9 +270,73 @@ void sys_theme(int t)
     con_touch_all();
     sys_flush();
     set_colours(theme_rgb[theme]);
+    if (compute == 2 && phase == 2)
+        sys_compute(0);
+    else if (compute == 1 && phase == 2)
+        set_col0((u16)((theme_rgb[theme][0] >> 1) & 0x777));
 }
 
 void sys_cursor(int on) { cursor_on = on; }
+
+void sys_compute(int on)
+{
+    u16 *c;
+    if (on == compute) return;
+    compute = on;
+    if (phase != 2) return;
+    band_r0 = band_r1 = -1;
+    if (on) {
+        set_col0((u16)((theme_rgb[theme][0] >> 1) & 0x777));
+        REG16(DMACON) = 0x0120;             /* BPLEN | SPREN off during prefill */
+    } else {
+        cop_cur ^= 1;
+        c = cop[cop_cur];
+        c[1] = 0xA200;                      /* full screen: hires, 2 planes */
+        set_col0(theme_rgb[theme][0]);
+        c[cop_split_off] = 0xFFFF;
+        c[cop_split_off + 1] = 0xFFFE;      /* disable band split */
+        REG32(COP1LC) = (u32)c;
+        REG16(DMACON) = 0x83A0;             /* restore BPLEN | COPEN | SPREN */
+    }
+}
+
+void sys_decode_band(int row)
+{
+    int r0, r1;
+    u16 *c, *s;
+    u32 b0, b1;
+    u16 y0, y1;
+    if (phase != 2) return;
+    r0 = row - 2;
+    if (r0 < 0) r0 = 0;
+    if (r0 > 21) r0 = 21;
+    r1 = r0 + 4;
+    if (r1 > 22) r1 = 22;
+    if (compute == 2 && r0 == band_r0 && r1 == band_r1) return;
+    band_r0 = r0;
+    band_r1 = r1;
+    cop_cur ^= 1;
+    c = cop[cop_cur];
+    c[1] = 0x0200;                          /* 0 bitplane DMA outside the band */
+    set_col0(theme_rgb[theme][0]);
+    y0 = (u16)(0x48 + r0 * 8);
+    y1 = (u16)(0x48 + r1 * 8);
+    b0 = (u32)pl0 + (u32)r0 * (8 * 80);
+    b1 = (u32)pl1 + (u32)r0 * (8 * 80);
+    s = c + cop_split_off;
+    *s++ = (u16)((y0 << 8) | 0x01); *s++ = 0xFFFE;
+    *s++ = 0x00E0; *s++ = (u16)(b0 >> 16);
+    *s++ = 0x00E2; *s++ = (u16)b0;
+    *s++ = 0x00E4; *s++ = (u16)(b1 >> 16);
+    *s++ = 0x00E6; *s++ = (u16)b1;
+    *s++ = 0x0100; *s++ = 0xA200;
+    *s++ = (u16)((y1 << 8) | 0x01); *s++ = 0xFFFE;
+    *s++ = 0x0100; *s++ = 0x0200;
+    *s++ = 0xFFFF; *s++ = 0xFFFE;
+    REG32(COP1LC) = (u32)c;
+    if (compute == 1) REG16(DMACON) = 0x83A0;
+    compute = 2;
+}
 
 /* ------------------------------------------------------------ keys */
 
@@ -279,7 +359,7 @@ static int poll_key(void)
         if (k == 0x41) return K_BS;
         if (k == 0x45) return K_ESC;
         if (k == 0x4C) return K_UP;
-        if (k >= 0x50 && k <= 0x54) return K_F1 + (k - 0x50);
+        if (k >= 0x50 && k <= 0x56) return K_F1 + (k - 0x50);
         if (k <= 0x40) {
             c = (unsigned char)kmap[shift][k];
             if (caps && c >= 'a' && c <= 'z') c -= 32;
@@ -293,7 +373,6 @@ static int held = -1;
 
 int sys_kbhit(void)
 {
-    sys_flush();
     if (phase != 2) return 0;
     if (held < 0) held = poll_key();
     return held >= 0;
@@ -335,6 +414,7 @@ void sys_shot(const char *name)
 {
     u8 *s;
     int t, i, cx, cy;
+    if (compute == 2) sys_compute(0);
     if (!shot) shot = (u8 *)malloc(SHOT_BYTES);
     if (!shot) return;
     strncpy(shot_name, name, 31);

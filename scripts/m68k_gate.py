@@ -88,7 +88,7 @@ def build(kernel, extra=(), tag=""):
         if m:
             syms[m.group(2)] = int(m.group(1), 16)
     need = ("_tiny_init", "_tiny_step", "_tiny_prefill", "_tiny_think", "_tiny_score",
-            "_tiny_layer_act", "_tiny_kv_bytes")
+            "_tiny_layer_act", "_tiny_kv_bytes", "_tiny_prefix_always")
     for s in need:
         if s not in syms:
             die(f"symbol {s} not in {mp}")
@@ -168,6 +168,9 @@ def s32(v):
 
 def gate(kernel, engine, quick, oracle_probes, oracle_answers, qs, m):
     code, sy = build(kernel)
+    print(f"  binary size: {len(code)} bytes (limit < 64500)")
+    if len(code) >= 64500:
+        die(f"engine binary too large: {len(code)} >= 64500")
     cpu = Musashi() if engine == "musashi" else Unicorn()
     blob = open(os.path.join(ROOT, "tiny.t68"), "rb").read()
     if BASE + len(code) > BLOB or BLOB + len(blob) > KVMEM:
@@ -223,7 +226,36 @@ def gate(kernel, engine, quick, oracle_probes, oracle_answers, qs, m):
     fails += pfails
     print(f"  prefill: {len(probes)} probes" + ("" if pfails else ", scores after the question identical"))
 
-    runs = [(0, 1, qs[:2 if quick else N_THINK])]
+    # Fast Mode prefill_planes = 5, 6 against oracle_tiny.py on first probe
+    if "_tiny_fast_planes" in sy:
+        import oracle_tiny as O
+        ffails = 0
+        toks = probes[0][1]
+        nq = len(probes[0][0])
+        for pl in (5, 6):
+            st = O.State(m)
+            cpu.write(sy["_tiny_fast_planes"], struct.pack(">I", pl))
+            for p, t in enumerate(toks):
+                if p < nq:
+                    O.step(m, st, t, p, full=False, prefill_planes=pl)
+                    cpu.call(sy["_tiny_prefill"], t, p)
+                    continue
+                want = O.step(m, st, t, p) + list(st.layer_act)
+                cpu.call(sy["_tiny_step"], t, p)
+                got = [s32(v) for v in struct.unpack(f">{m.vocab}I", cpu.read(sy["_tiny_score"], 4 * m.vocab))]
+                got += [s32(v) for v in struct.unpack(f">{m.L}I", cpu.read(sy["_tiny_layer_act"], 4 * m.L))]
+                if got != want:
+                    print(f"  FAIL fast prefill planes={pl} pos {p}", file=sys.stderr)
+                    ffails += 1
+                    break
+        cpu.write(sy["_tiny_fast_planes"], struct.pack(">I", 8))
+        fails += ffails
+        print("  fast prefill (planes 5, 6):" + (" FAIL" if ffails else " identical"))
+
+    extra_qs = ["how many legs does a spider have",
+                "which animal says hoot",
+                "who invented the telephone"]
+    runs = [(0, 1, qs[:2] if quick else qs[:N_THINK] + extra_qs)]
     if not quick:
         runs.append((THINK_SAMPLED[0], THINK_SAMPLED[1], qs[:2]))
     for cr, seed, qlist in runs:
@@ -239,6 +271,31 @@ def gate(kernel, engine, quick, oracle_probes, oracle_answers, qs, m):
                 print(f"  FAIL think c={cr} {q!r}: 68000={got!r} oracle={want!r}", file=sys.stderr)
                 fails += 1
         print(f"  answers c={cr} s={seed}: {same}/{len(qlist)} identical")
+
+    if not quick and "_tiny_fast_planes" in sy and "_tiny_prefix_always" in sy:
+        import oracle_tiny as O
+        pq = "how many legs does a spider have"
+        cpu.write(sy["_tiny_fast_planes"], struct.pack(">I", 5))
+        cpu.write(sy["_tiny_prefix_always"], struct.pack(">I", 0))
+        cpu.write(STR, pq.encode("ascii") + b"\0")
+        n0, cyc0 = cpu.call(sy["_tiny_think"], STR, STR + 0x100, 0, 1)
+        got0 = cpu.read(STR + 0x100, n0).decode("ascii")
+        want0 = O.think(m, pq, 0, 1, prefill_planes=5)
+        if got0 != want0:
+            print(f"  FAIL fast prefix_always=0 {pq!r}: 68000={got0!r} oracle={want0!r}", file=sys.stderr)
+            fails += 1
+        cpu.call(sy["_tiny_prefill"], 2, 0)
+        cpu.write(sy["_tiny_prefix_always"], struct.pack(">I", 1))
+        cpu.write(STR, pq.encode("ascii") + b"\0")
+        n1, cyc1 = cpu.call(sy["_tiny_think"], STR, STR + 0x100, 0, 1)
+        got1 = cpu.read(STR + 0x100, n1).decode("ascii")
+        if n1 == 0 or (cpu.cycles_ok and cyc1 >= cyc0):
+            print(f"  FAIL fast prefix_always=1 {pq!r}: n={n1} cyc0={cyc0} cyc1={cyc1}", file=sys.stderr)
+            fails += 1
+        else:
+            print(f"  fast prefix_always: 0->{got0!r} ({cyc0:,} cyc), 1->{got1!r} ({cyc1:,} cyc)")
+        cpu.write(sy["_tiny_fast_planes"], struct.pack(">I", 8))
+        cpu.write(sy["_tiny_prefix_always"], struct.pack(">I", 0))
 
     if cpu.cycles_ok and per_pos:
         lo, hi = min(per_pos), max(per_pos)
@@ -278,7 +335,9 @@ def main():
     qs = [clean(l) for l in open(os.path.join(ROOT, "questions.txt"))]
     qs = [q for q in qs if q]
     answers = {}
-    for q in qs[:N_THINK]:
+    for q in qs[:N_THINK] + ["how many legs does a spider have",
+                             "which animal says hoot",
+                             "who invented the telephone"]:
         answers[(q, 0, 1)] = O.think(m, q, 0, 1)
     for q in qs[:2]:
         answers[(q, THINK_SAMPLED[0], THINK_SAMPLED[1])] = O.think(m, q, *THINK_SAMPLED)

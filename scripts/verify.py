@@ -126,10 +126,32 @@ def main():
     fails += pfails
     print(f"prefill: {len(PROBES)} probes" + ("" if pfails else ", scores after the question identical"))
 
+    # 1c. Fast Mode prefill_planes (5 and 6) against oracle_tiny.py
+    ffails = 0
+    for pl in (5, 6):
+        q, a = PROBES[0]
+        st = O.State(m)
+        text = [ord(c) - 30 for c in q] + [1] + [ord(c) - 30 for c in a]
+        py = []
+        for p, t in enumerate(text):
+            sc = O.step(m, st, t, p, full=(p >= len(q)), prefill_planes=pl)
+            if p >= len(q):
+                py += sc + list(st.layer_act)
+        c = c_run(exe, ["-f", str(pl), "-dumppre", q, a]).split()
+        if c != [str(v) for v in py]:
+            print(f"FAIL fast prefill planes={pl} {q!r}", file=sys.stderr)
+            ffails += 1
+    fails += ffails
+    print(f"fast prefill (planes 5, 6): 2 probes" + ("" if ffails else ", identical"))
+
     # 2./3. answers
     qs = [clean(l) for l in open(os.path.join(ROOT, "questions.txt"))]
     qs = [q for q in qs if q]
     runs = [(0, 1, qs)] + [(c, s, qs[:SAMPLED_QS]) for c, s in SAMPLED]
+    heldout = os.path.join(ROOT, "scripts", "heldout.txt")
+    if os.path.isfile(heldout):
+        hqs = [clean(l) for l in open(heldout) if clean(l)]
+        runs.append((0, 1, hqs))
     for cr, seed, qlist in runs:
         got = c_run(exe, ["-ask", "-c", str(cr), "-s", str(seed)],
                     stdin="\n".join(qlist) + "\n").splitlines()
@@ -143,6 +165,22 @@ def main():
             fails += 1
         else:
             print(f"answers c={cr} s={seed}: {len(want)}/{len(want)} identical")
+
+    # 4. CLI -f 5 must keep tiny_prefix_always=0 and match oracle prefill_planes=5
+    pqs = [
+        "what is the capital of peru",
+        "is a whale a fish",
+        "how many legs does a spider have",
+        "who invented the telephone",
+        "which animal says hoot",
+    ]
+    got5 = c_run(exe, ["-f", "5", "-ask"], stdin="\n".join(pqs) + "\n").splitlines()
+    want5 = [O.think(m, q, 0, 1, prefill_planes=5) for q in pqs]
+    if got5 != want5:
+        print(f"FAIL fast -f 5 answers: got={got5!r} oracle={want5!r}", file=sys.stderr)
+        fails += 1
+    else:
+        print(f"answers -f 5 (prefix_always=0): {len(want5)}/{len(want5)} identical")
 
     if fails:
         print("Do not proceed. The C has drifted from oracle_tiny.py.", file=sys.stderr)

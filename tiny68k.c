@@ -221,10 +221,26 @@ static void scale_of(s32 big, u16 cm, u16 cs, u16 *m, s16 *sh)
 }
 
 #ifdef USE_ASM
+u32 rms_sumsq(__reg("a0") const s32 *x, __reg("d0") s32 n, __reg("a1") s32 *out_k);
 void kv_quant(__reg("a0") const s32 *v, __reg("d0") s32 n, __reg("a1") s8 *q, __reg("d1") s32 f);
 void rms_apply(__reg("a0") s32 *out, __reg("a1") const s32 *x, __reg("d0") s32 n,
                __reg("d1") s32 inv, __reg("d2") const s32 *g);
 #else
+static u32 rms_sumsq(const s32 *x, s32 n, s32 *out_k)
+{
+    u32 amax = 0, a, ss = 0;
+    s32 j, k = 0;
+    for (j = 0; j < n; j++) { a = (u32)(x[j] < 0 ? -x[j] : x[j]); if (a > amax) amax = a; }
+    if (amax == 0) { *out_k = 0; return 0; }
+    while ((amax >> k) >= 4096UL) k++;
+    for (j = 0; j < n; j++) {
+        a = (u32)(x[j] < 0 ? -x[j] : x[j]) >> k;
+        ss += (u32)(u16)a * (u16)a;                   /* MULU, < 2^24 */
+    }
+    *out_k = k;
+    return ss;
+}
+
 /* The loops of store_kv() and rmsnorm() (one asm call each on the Amiga). */
 static void kv_quant(const s32 *v, s32 n, s8 *q, s32 f)
 {
@@ -249,22 +265,18 @@ static void rms_apply(s32 *out, const s32 *x, s32 n, s32 inv, const s32 *g)
  * |x| up to 32767.0 never overflows, no eps. */
 static void rmsnorm(s32 *out, const s32 *x, const s32 *g, int n)
 {
-    u32 amax = 0, a, ss = 0, mean;
-    int j, k = 0, e = 0, s;
+    u32 ss, mean;
+    s32 k = 0;
+    int j, e = 0, s;
     s32 inv;
-    for (j = 0; j < n; j++) { a = (u32)(x[j] < 0 ? -x[j] : x[j]); if (a > amax) amax = a; }
-    if (amax == 0) { for (j = 0; j < n; j++) out[j] = 0; return; }
-    while ((amax >> k) >= 4096UL) k++;
-    for (j = 0; j < n; j++) {
-        a = (u32)(x[j] < 0 ? -x[j] : x[j]) >> k;
-        ss += (u32)(u16)a * (u16)a;                   /* MULU, < 2^24 */
-    }
+    ss = rms_sumsq(x, n, &k);
+    if (ss == 0) { for (j = 0; j < n; j++) out[j] = 0; return; }
     mean = ss / (u32)n;
     if (mean == 0) mean = 1;
     while (mean >= (1UL << 18)) { mean >>= 2; e++; }
     while (mean < (1UL << 16))  { mean <<= 2; e--; }
     inv = fxrsqrt((s32)mean);
-    s = 8 - k - e;
+    s = 8 - (int)k - e;
     inv = s >= 0 ? (s32)((u32)inv << s) : inv >> (-s);
     rms_apply(out, x, n, inv, g);
 }
@@ -300,6 +312,7 @@ typedef struct {
     QT emb, pos;
     QT t[MAXL][NT];
     int tab;                  /* wq wk wv wo f1 stored as bit planes, matmul_bp() */
+    int f2_trans;             /* f2 stored transposed (cols x rows) */
     u8 *blob;
 } Model;
 
@@ -371,11 +384,22 @@ void dots_i8_x16(__reg("a0") const s8 *w, __reg("a1") const s16 *x, __reg("d0") 
                  __reg("d1") s32 *out, __reg("d2") s32 rows);
 void dots_i8_x16_sparse(__reg("a0") const s8 *w, __reg("a1") const s16 *pairs, __reg("d0") s32 k,
                         __reg("d1") s32 *out, __reg("d2") s32 rows, __reg("d3") s32 cols);
+void dots_i8_x16_sparse_T(__reg("a0") const s8 *wt, __reg("a1") const s16 *pairs_off, __reg("d0") s32 k,
+                          __reg("d1") s32 *out, __reg("d2") s32 rows);
 void mulshift_rows(__reg("a0") s32 *out, __reg("a1") const u16 *mant, __reg("d0") s32 rows,
                    __reg("d1") s32 xsh, __reg("d2") const u16 *shift);
-void bp_dots(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 groups,
-             __reg("d1") s32 *out, __reg("d2") s32 nblk, __reg("d3") s32 bias,
-             __reg("d4") const u8 *spill);
+void bp_dots_p(__reg("a0") const u8 *w, __reg("a1") const s32 *tab, __reg("d0") s32 groups,
+               __reg("d1") s32 *out, __reg("d2") s32 nblk, __reg("d3") s32 bias,
+               __reg("d4") const u8 *spill, __reg("d5") s32 planes);
+s32 att_qk_head(__reg("a0") const s8 *k, __reg("a1") const s16 *q, __reg("d0") s32 p1,
+                __reg("d1") s32 hd, __reg("d2") s32 stride, __reg("d3") s32 qsh,
+                __reg("d4") const u16 *km, __reg("d5") const s16 *ks, __reg("d6") s32 *att);
+void att_softmax_wgt(__reg("a0") s32 *att, __reg("a1") s32 *wgt, __reg("d0") s32 p1,
+                     __reg("d1") s32 mx, __reg("d2") const s32 *exp_tab,
+                     __reg("d3") const u16 *vm, __reg("d4") const s16 *vs);
+void att_wv_head(__reg("a0") const s16 *wq16, __reg("a1") const s8 *vc, __reg("d0") s32 p1,
+                 __reg("d1") s32 hd, __reg("d2") s32 stride, __reg("d3") s32 s,
+                 __reg("d4") s32 *ba);
 #else
 static s32 dot_i8_x16(const s8 *w, const s16 *x, s32 n)
 {
@@ -424,27 +448,32 @@ static s32 build_bptab(const s16 *x, s32 *tab, s32 n)
     return sum;
 }
 
-/* Raw dots of nblk blocks of 8 rows from bit-plane weights (bitplane_blocks):
-   with u = w + 128 (the byte w ^ 0x80), dot = sum_k 2^k S_k - 128 sum(x),
-   S_k = sum over groups of tab[64 g + (pattern of bit k of u, 6 columns)].
-   Horner over the planes, 7 first; bias = 128 sum(x). Exact mod 2^32.
-   Per block, planes 7..2 are at w and planes 1..0 at spill. */
-static void bp_dots(const u8 *w, const s32 *tab, s32 groups, s32 *out, s32 nblk, s32 bias,
-                    const u8 *spill)
+/* Raw dots of nblk blocks of 8 rows from bit-plane weights (bitplane_blocks),
+   using the top `planes` (1..8) bit planes and midpoint bias. When planes <= 6,
+   spill is never read. */
+static void bp_dots_p(const u8 *w, const s32 *tab, s32 groups, s32 *out, s32 nblk, s32 bias,
+                      const u8 *spill, s32 planes)
 {
     u32 acc[8];
-    s32 k, g, r;
+    s32 k, g, r, wskip;
     const s32 *t;
     const u8 *p;
+    if (planes < 1) planes = 1;
+    if (planes > 8) planes = 8;
+    wskip = planes < 6 ? (6 - planes) * groups * 8 : 0;
     for (; nblk > 0; nblk--, out += 8) {
         for (r = 0; r < 8; r++) acc[r] = 0;
-        for (k = 0; k < 8; k++) {
+        for (k = 0; k < planes; k++) {
             p = k < 6 ? w : spill;
             for (r = 0; r < 8; r++) acc[r] += acc[r];
             for (g = 0, t = tab; g < groups; g++, t += 64)
                 for (r = 0; r < 8; r++) acc[r] += (u32)t[*p++ >> 2];
             if (k < 6) w = p; else spill = p;
         }
+        if (wskip) w += wskip;
+        if (planes == 7) spill += groups * 8;
+        if (planes < 8)
+            for (r = 0; r < 8; r++) acc[r] <<= 8 - planes;
         for (r = 0; r < 8; r++) out[r] = (s32)(acc[r] - (u32)bias);
     }
 }
@@ -460,11 +489,53 @@ static void dots_i8_x16_sparse(const s8 *w, const s16 *pairs, s32 k, s32 *out, s
     for (; rows > 0; rows--, w += cols) *out++ = dot_i8_x16_sparse(w, pairs, k);
 }
 
+static void dots_i8_x16_sparse_T(const s8 *wt, const s16 *pairs_off, s32 k, s32 *out, s32 rows)
+{
+    s32 r, i;
+    for (r = 0; r < rows; r++) out[r] = 0;
+    for (i = 0; i < k; i++) {
+        const s8 *col = wt + (u16)pairs_off[2 * i];
+        s32 x = (s32)pairs_off[2 * i + 1];
+        for (r = 0; r < rows; r++) out[r] += (s32)col[r] * x;
+    }
+}
+
 /* out[r] = mulshift(out[r], mant[r], shift[r] - xsh), in place. */
 static void mulshift_rows(s32 *out, const u16 *mant, s32 rows, s32 xsh, const u16 *shift)
 {
     s32 r;
     for (r = 0; r < rows; r++) out[r] = mulshift(out[r], mant[r], (int)shift[r] - xsh);
+}
+
+static s32 att_qk_head(const s8 *k, const s16 *q, s32 p1, s32 hd, s32 stride, s32 qsh,
+                       const u16 *km, const s16 *ks, s32 *att)
+{
+    s32 j, mx = -0x7FFFFFFFL - 1, v;
+    for (j = 0; j < p1; j++, k += stride) {
+        v = mulshift(dot_i8_x16(k, q, hd), km[j], (int)ks[j] - qsh);
+        att[j] = v;
+        if (v > mx) mx = v;
+    }
+    return mx;
+}
+
+static void att_softmax_wgt(s32 *att, s32 *wgt, s32 p1, s32 mx, const s32 *exp_tab,
+                            const u16 *vm, const s16 *vs)
+{
+    s32 j, tot = 0, inv;
+    for (j = 0; j < p1; j++) { att[j] = fxexp_neg(exp_tab, mx - att[j]); tot += att[j]; }
+    inv = fxdiv(ONE, tot);
+    for (j = 0; j < p1; j++)
+        wgt[j] = mulshift(fxmul(att[j], inv), vm[j], (int)vs[j]);
+}
+
+static void att_wv_head(const s16 *wq16, const s8 *vc, s32 p1, s32 hd, s32 stride, s32 s, s32 *ba)
+{
+    s32 i, acc;
+    for (i = 0; i < hd; i++) {
+        acc = dot_x16_i8s(wq16, vc + i, p1, stride);
+        ba[i] = s >= 0 ? acc >> s : (s32)((u32)acc << (-s));
+    }
 }
 #endif
 
@@ -484,16 +555,26 @@ static void matmul(const QT *t, const s16 *x, int xsh, s32 *out)
 #define TB 8
 #define TG 6
 static s32 *ctab;                           /* D / 6 * 64 longs, after the KV caches */
-static s32 cbias;                           /* 128 * sum of the input of ctab */
+static s32 csum;                            /* sum of the input of ctab */
 
 static void tab_input(const s16 *x, int n)
 {
-    cbias = (s32)((u32)build_bptab(x, ctab, n) << 7);
+    csum = build_bptab(x, ctab, n);
 }
 
-static void matmul_bp(const QT *t, int xsh, s32 *out)
+static void matmul_bp(const QT *t, int xsh, s32 *out, int planes)
 {
-    bp_dots((const u8 *)t->w, ctab, t->cols / TG, out, t->rows / TB, cbias, t->spill);
+    s32 bias;
+    if (planes >= 8) {
+        bias = (s32)((u32)csum << 7);
+        planes = 8;
+    } else {
+        int drop;
+        if (planes < 1) planes = 1;
+        drop = 8 - planes;
+        bias = (s32)(((u32)csum << 8) + (u32)csum - ((u32)csum << drop)) >> 1;
+    }
+    bp_dots_p((const u8 *)t->w, ctab, t->cols / TG, out, t->rows / TB, bias, t->spill, planes);
     mulshift_rows(out, t->mant, t->rows, xsh, t->shift);
 }
 
@@ -527,6 +608,18 @@ static void bitplane_blocks(QT *t)
     }
 }
 
+/* Transpose t->w (rows x cols -> cols x rows) using tmp (>= rows * cols bytes). */
+static void transpose_qt(QT *t, s8 *tmp)
+{
+    long n = (long)t->rows * t->cols, i;
+    int r, c, rows = t->rows, cols = t->cols;
+    s8 *w = t->w;
+    for (i = 0; i < n; i++) tmp[i] = w[i];
+    for (c = 0; c < cols; c++)
+        for (r = 0; r < rows; r++)
+            w[(long)c * rows + r] = tmp[(long)r * cols + c];
+}
+
 static void matmul_q(const QT *t, const s32 *x, s32 *out)
 {
     int sh = quantize16(x, t->cols, xq);
@@ -536,12 +629,19 @@ static void matmul_q(const QT *t, const s32 *x, s32 *out)
 /* matmul_q for an input that is mostly zero (after the ReLU, ~80%): the same
    sum, with the zero terms left out. Exact: a zero term adds nothing. */
 static s16 pairs[2 * MAXHID];
-static void matmul_q_sparse(const QT *t, const s32 *x, s32 *out)
+static void matmul_q_sparse(const QT *t, const s32 *x, s32 *out, int trans)
 {
     int j, k = 0, cols = t->cols, sh = quantize16(x, cols, xq);
-    for (j = 0; j < cols; j++)
-        if (xq[j]) { pairs[2 * k] = (s16)j; pairs[2 * k + 1] = xq[j]; k++; }
-    dots_i8_x16_sparse(t->w, pairs, k, out, t->rows, cols);
+    if (trans) {
+        u16 off = 0, step = t->rows;
+        for (j = 0; j < cols; j++, off += step)
+            if (xq[j]) { pairs[2 * k] = (s16)off; pairs[2 * k + 1] = xq[j]; k++; }
+        dots_i8_x16_sparse_T(t->w, pairs, k, out, t->rows);
+    } else {
+        for (j = 0; j < cols; j++)
+            if (xq[j]) { pairs[2 * k] = (s16)j; pairs[2 * k + 1] = xq[j]; k++; }
+        dots_i8_x16_sparse(t->w, pairs, k, out, t->rows, cols);
+    }
     mulshift_rows(out, t->mant, t->rows, sh, t->shift);
 }
 
@@ -563,29 +663,30 @@ static s16 qq[MAXD], wq16[CTX];
 s32 tiny_score[VOCAB];                     /* Q16.16 scores of step() */
 #define score tiny_score
 
+int tiny_fast_planes = 8;                  /* 8 = bit-exact; <8 = Fast Mode prefill planes */
+int tiny_prefix_always = 0;                /* 1 = also use exact 8-bit prefix cache when planes < 8 */
+
+#include "prefix_kv.h"
+
+static char prev_q[MAXQ + 1];
+static int prev_len = 0;
+static int prev_planes = 0;
+static int prefix_ok = 0;
+
 static void attention(const Model *m, int l, int p)
 {
-    int h, i, j, o, HD = m->HD, qsh, wsh, s;
-    s32 mx, tot, inv, acc;
+    int h, o, HD = m->HD, qsh, wsh, s, p1 = p + 1;
+    s32 mx;
+    const s8 *kbase = kc + KV(m, l, 0);
+    const s8 *vbase = vc + KV(m, l, 0);
     qsh = quantize16(bq, m->D, qq);
     for (h = 0; h < m->H; h++) {
         o = h * HD;
-        for (j = 0; j <= p; j++)
-            att[j] = mulshift(dot_i8_x16(kc + KV(m, l, j) + o, qq + o, HD),
-                              km[l][j], (int)ks[l][j] - qsh);
-        mx = att[0];
-        for (j = 1; j <= p; j++) if (att[j] > mx) mx = att[j];
-        tot = 0;
-        for (j = 0; j <= p; j++) { att[j] = fxexp_neg(m->exp_tab, mx - att[j]); tot += att[j]; }
-        inv = fxdiv(ONE, tot);
-        for (j = 0; j <= p; j++)
-            wgt[j] = mulshift(fxmul(att[j], inv), vm[l][j], vs[l][j]);   /* Q24 */
-        wsh = quantize16(wgt, p + 1, wq16);
+        mx = att_qk_head(kbase + o, qq + o, p1, HD, m->D, qsh, km[l], ks[l], att);
+        att_softmax_wgt(att, wgt, p1, mx, m->exp_tab, vm[l], vs[l]);
+        wsh = quantize16(wgt, p1, wq16);
         s = 8 - wsh;
-        for (i = 0; i < HD; i++) {
-            acc = dot_x16_i8s(wq16, vc + KV(m, l, 0) + o + i, p + 1, m->D);
-            ba[o + i] = s >= 0 ? acc >> s : (s32)((u32)acc << (-s));
-        }
+        att_wv_head(wq16, vbase + o, p1, HD, m->D, s, ba + o);
     }
 }
 
@@ -593,16 +694,19 @@ static void attention(const Model *m, int l, int p)
    full = 0 is prefill, for question letters whose scores nobody reads: it
    stops once the last layer has stored its key and value, so score[] and
    layer_act[L-1] are left as they were. Everything a later step reads (the
-   KV caches) is identical to a full step's. */
+   KV caches) is identical to a full step's when tiny_fast_planes == 8. */
 static void step(const Model *m, int tok, int p, int full)
 {
     int l, j, D = m->D;
+    int planes = full ? 8 : tiny_fast_planes;
     s32 sum;
     const QT *e = &m->emb, *ps = &m->pos;
+    const s8 *ew = e->w + (long)tok * D, *pw = ps->w + (long)p * D;
+    u16 em = e->mant[tok], pm = ps->mant[p];
+    int es = (int)e->shift[tok] - 16, ps_sh = (int)ps->shift[p] - 16;
 
     for (j = 0; j < D; j++)
-        bx[j] = mulshift(e->w[(long)tok * D + j], e->mant[tok], (int)e->shift[tok] - 16)
-              + mulshift(ps->w[(long)p * D + j], ps->mant[p], (int)ps->shift[p] - 16);
+        bx[j] = mulshift(ew[j], em, es) + mulshift(pw[j], pm, ps_sh);
 
     for (l = 0; l < m->L; l++) {
         const QT *t = m->t[l];
@@ -611,8 +715,8 @@ static void step(const Model *m, int tok, int p, int full)
         sh = quantize16(bh, D, xq);
         if (m->tab) {
             tab_input(xq, D);
-            matmul_bp(&t[T_WK], sh, bk);
-            matmul_bp(&t[T_WV], sh, bv);
+            matmul_bp(&t[T_WK], sh, bk, planes);
+            matmul_bp(&t[T_WV], sh, bv, planes);
         } else {
             matmul(&t[T_WK], xq, sh, bk);
             matmul(&t[T_WV], xq, sh, bv);
@@ -620,14 +724,14 @@ static void step(const Model *m, int tok, int p, int full)
         scale_of(store_kv(bk, D, kc + KV(m, l, p)), m->kc_m, m->kc_s, &km[l][p], &ks[l][p]);
         scale_of(store_kv(bv, D, vc + KV(m, l, p)), m->vc_m, m->vc_s, &vm[l][p], &vs[l][p]);
         if (!full && l == m->L - 1) return;     /* prefill: nothing else is read */
-        if (m->tab) matmul_bp(&t[T_WQ], sh, bq);    /* ctab still holds xq's */
+        if (m->tab) matmul_bp(&t[T_WQ], sh, bq, planes); /* ctab still holds xq's */
         else        matmul(&t[T_WQ], xq, sh, bq);
 
         attention(m, l, p);
         if (m->tab) {
             sh = quantize16(ba, D, xq);
             tab_input(xq, D);
-            matmul_bp(&t[T_WO], sh, bt);
+            matmul_bp(&t[T_WO], sh, bt, planes);
         } else
             matmul_q(&t[T_WO], ba, bt);
         for (j = 0; j < D; j++) bx[j] += bt[j];
@@ -636,13 +740,13 @@ static void step(const Model *m, int tok, int p, int full)
         if (m->tab) {
             sh = quantize16(bh, D, xq);
             tab_input(xq, D);
-            matmul_bp(&t[T_F1], sh, bm);
+            matmul_bp(&t[T_F1], sh, bm, planes);
         } else
             matmul_q(&t[T_F1], bh, bm);
         sum = 0;
         for (j = 0; j < m->HID; j++) { if (bm[j] < 0) bm[j] = 0; sum += bm[j]; }
         layer_act[l] = sum / m->HID;
-        matmul_q_sparse(&t[T_F2], bm, bt);
+        matmul_q_sparse(&t[T_F2], bm, bt, m->f2_trans);
         for (j = 0; j < D; j++) bx[j] += bt[j];
     }
     rmsnorm(bh, bx, m->gf, D);
@@ -709,12 +813,56 @@ void (*tiny_on_step)(int i, int n);
 
 static int think(const Model *m, const char *q, char *out, int creativity)
 {
-    int p = 0, n = 0, tok, nq = 0;
+    int p = 0, n = 0, tok, nq = 0, common = 0, pre = 0, l;
+    int planes = tiny_fast_planes;
     while (q[nq]) nq++;
-    for (; q[p]; p++) {                              /* prefill */
+    if (planes == prev_planes) {
+        while (common < nq && common < prev_len && q[common] == prev_q[common])
+            common++;
+    }
+    if (prefix_ok && (planes == 8 || tiny_prefix_always)) {
+        u8 path[MAXQ];
+        int node = -1, pos = 0, i;
+        while (pos < nq && pos < MAXQ) {
+            int found = -1;
+            char ch = q[pos];
+            for (i = 0; i < PREFIX_NODES; i++) {
+                if (prefix_nodes[i].parent == node && prefix_nodes[i].ch == ch) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found < 0) break;
+            path[pos++] = (u8)found;
+            node = found;
+        }
+        pre = pos;
+        if (pre > common) {
+            for (l = 0; l < m->L; l++) {
+                long base = (long)l * CTX * m->D;
+                s8 *dk = kc + base, *dv = vc + base;
+                for (i = 0; i < pre; i++, dk += m->D, dv += m->D) {
+                    int id = path[i], j;
+                    const s8 *sk = prefix_kc[id][l], *sv = prefix_vc[id][l];
+                    for (j = 0; j < m->D; j++) { dk[j] = sk[j]; dv[j] = sv[j]; }
+                    km[l][i] = prefix_km[id][l];
+                    ks[l][i] = prefix_ks[id][l];
+                    vm[l][i] = prefix_vm[id][l];
+                    vs[l][i] = prefix_vs[id][l];
+                }
+            }
+            common = pre;
+        }
+    }
+    for (p = common; p < nq; p++) {                 /* prefill */
         if (tiny_on_step) tiny_on_step(p, nq);
         step(m, q[p] - 30, p, 0);
     }
+    for (l = 0; l < nq && l < MAXQ; l++) prev_q[l] = q[l];
+    prev_q[l] = 0;
+    prev_len = l;
+    prev_planes = planes;
+
     step(m, 1, p++, 1);                              /* its scores pick letter 1 */
     for (; p < CTX; p++) {
         tok = pick(m, creativity);
@@ -733,6 +881,45 @@ static int think(const Model *m, const char *q, char *out, int creativity)
    symbols (SMW P37), and the 68000 gate calls these by address. */
 static Model model;
 
+static u32 fnv_byte(u32 h, u8 b) { return (h ^ (u32)b) * 0x01000193UL; }
+static u32 fnv_u16(u32 h, u16 v)
+{
+    h = fnv_byte(h, (u8)(v >> 8));
+    return fnv_byte(h, (u8)(v & 0xFF));
+}
+static u32 fnv_s32(u32 h, s32 v)
+{
+    u32 u = (u32)v;
+    h = fnv_byte(h, (u8)(u >> 24));
+    h = fnv_byte(h, (u8)((u >> 16) & 0xFF));
+    h = fnv_byte(h, (u8)((u >> 8) & 0xFF));
+    return fnv_byte(h, (u8)(u & 0xFF));
+}
+static u32 fnv_qt_head(u32 h, const QT *t)
+{
+    long i, n = (long)t->rows * t->cols;
+    for (i = 0; i < t->rows; i++) h = fnv_u16(h, t->mant[i]);
+    for (i = 0; i < t->rows; i++) h = fnv_u16(h, t->shift[i]);
+    for (i = 0; i < n; i++) h = fnv_byte(h, (u8)t->w[i]);
+    return h;
+}
+static u32 model_hash(const Model *m)
+{
+    u32 h = 0x811C9DC5UL;
+    long i;
+    h = fnv_u16(h, (u16)m->D);    h = fnv_u16(h, (u16)m->L);
+    h = fnv_u16(h, (u16)m->H);    h = fnv_u16(h, (u16)m->HID);
+    h = fnv_u16(h, m->kc_m);      h = fnv_u16(h, m->kc_s);
+    h = fnv_u16(h, m->vc_m);      h = fnv_u16(h, m->vc_s);
+    for (i = 0; i < EXP_N; i++) h = fnv_s32(h, m->exp_tab[i]);
+    for (i = 0; i < (long)m->L * m->D; i++) h = fnv_s32(h, m->g1[i]);
+    for (i = 0; i < (long)m->L * m->D; i++) h = fnv_s32(h, m->g2[i]);
+    for (i = 0; i < m->D; i++) h = fnv_s32(h, m->gf[i]);
+    h = fnv_qt_head(h, &m->emb);
+    h = fnv_qt_head(h, &m->pos);
+    return h;
+}
+
 /* Caller memory: the key/value caches (2 * L * CTX * D bytes), the group
    tables of matmul_bp() (D / 6 * 64 longs), then the spilled planes 1..0 of
    wq wk wv wo f1 (spill_bytes() of each, L * (4 D^2 + HID D) / 3). */
@@ -743,9 +930,10 @@ long tiny_kv_bytes(const u8 *blob)
 }
 
 /* Reorders wq wk wv wo f1 for matmul_bp(), partly into the caller memory,
-   and marks the blob ("T68C") so that a second tiny_init() on the same blob
-   and the same kv memory does not reorder it again. The kv memory then holds
-   model data (the spilled planes): never clear or replace all of it. */
+   transposes f2 in-place via kv scratch, and marks the blob ("T68C") so
+   that a second tiny_init() on the same blob and kv memory does not reorder
+   it again. The kv memory then holds model data (the spilled planes): never
+   clear or replace all of it. */
 const char *tiny_init(u8 *blob, long size, s8 *kv)
 {
     int l, k;
@@ -753,11 +941,15 @@ const char *tiny_init(u8 *blob, long size, s8 *kv)
     u8 *spill;
     const char *err = parse_model(&model, blob, size);
     if (err) return err;
+    prev_len = 0;
+    prev_q[0] = 0;
+    prev_planes = 0;
     kc = kv;
     vc = kv + (long)model.L * CTX * model.D;
     ctab = (s32 *)(kv + 2L * model.L * CTX * model.D);
     spill = (u8 *)ctab + (long)model.D / TG * 256;
     model.tab = model.D % TG == 0 && model.D % TB == 0 && model.HID % TB == 0;
+    model.f2_trans = model.tab && (long)model.HID * model.D <= 65535L;
     if (model.tab)
         for (l = 0; l < model.L; l++)
             for (k = 0; k < 5; k++) {
@@ -768,14 +960,18 @@ const char *tiny_init(u8 *blob, long size, s8 *kv)
     if (model.tab && blob[3] == 'A') {
         for (l = 0; l < model.L; l++)
             for (k = 0; k < 5; k++) bitplane_blocks(&model.t[l][bpt[k]]);
+        if (model.f2_trans)
+            for (l = 0; l < model.L; l++) transpose_qt(&model.t[l][T_F2], kv);
         blob[3] = 'C';
     } else if (!model.tab && blob[3] == 'C')
         return "blob already reordered";
+    prefix_ok = (model.D == 96 && model.L == 4 && model.H == 4 && model.HID == 256 &&
+                 model_hash(&model) == PREFIX_HASH);
     return NIL;
 }
 
-void tiny_step(int tok, int p) { step(&model, tok, p, 1); }
-void tiny_prefill(int tok, int p) { step(&model, tok, p, 0); }
+void tiny_step(int tok, int p) { prev_len = 0; step(&model, tok, p, 1); }
+void tiny_prefill(int tok, int p) { prev_len = 0; step(&model, tok, p, 0); }
 
 int tiny_think(const char *q, char *out, int creativity, u32 seed)
 {
@@ -879,16 +1075,23 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) creativity = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seed = (u32)atol(argv[++i]);
         else if (!strcmp(argv[i], "-ask")) ask = 1;
-        else if ((!strcmp(argv[i], "-dump") || !strcmp(argv[i], "-dumppre")) && i + 2 < argc) {
-            if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
-            return dump(&model, argv[i + 1], argv[i + 2], argv[i][5] == 'p');
+        else if (!strcmp(argv[i], "-fast")) tiny_fast_planes = 5;
+        else if (!strcmp(argv[i], "-f") && i + 1 < argc) {
+            tiny_fast_planes = atoi(argv[++i]);
+            if (tiny_fast_planes < 1) tiny_fast_planes = 1;
+            if (tiny_fast_planes > 8) tiny_fast_planes = 8;
         }
+        else if ((!strcmp(argv[i], "-dump") || !strcmp(argv[i], "-dumppre")) && i + 2 < argc) i += 2;
     }
     if ((err = load_model(mp)) != NULL) { fprintf(stderr, "tiny68k: %s\n", err); return 1; }
+    for (i = 2; i < argc; i++) {
+        if ((!strcmp(argv[i], "-dump") || !strcmp(argv[i], "-dumppre")) && i + 2 < argc)
+            return dump(&model, argv[i + 1], argv[i + 2], argv[i][5] == 'p');
+    }
 
     if (!ask) {
-        printf("TINY 2.1 for the 68000 - %d layers, %d wide, creativity %d.\n",
-               model.L, model.D, creativity);
+        printf("TINY 2.1 for the 68000 - %d layers, %d wide, creativity %d, planes %d.\n",
+               model.L, model.D, creativity, tiny_fast_planes);
         printf("Ask a question, or QUIT.\n");
     }
     for (;;) {

@@ -104,8 +104,10 @@ def main():
         if m:
             sym[m.group(1)] = int(m.group(2), 16)
     need = ["_dot_i8_x16", "_dot_x16_i8s", "_dot_i8_x16_sparse", "_fxmul", "_mulshift",
-            "_build_bptab", "_bp_dots", "_dots_i8_x16", "_dots_i8_x16_sparse",
-            "_mulshift_rows", "_fxdiv", "_quantize16", "_rms_apply", "_kv_quant"]
+            "_build_bptab", "_bp_dots", "_bp_dots_p", "_dots_i8_x16", "_dots_i8_x16_sparse",
+            "_dots_i8_x16_sparse_T", "_mulshift_rows", "_fxdiv", "_quantize16",
+            "_rms_sumsq", "_rms_apply", "_kv_quant",
+            "_att_qk_head", "_att_softmax_wgt", "_att_wv_head"]
     if not all(n in sym for n in need):
         # fall back: find the labels in the listing's symbol table
         for ln in open(lst, errors="replace"):
@@ -347,6 +349,138 @@ def main():
             want.append((-r if v < 0 else r) & 0xFF)
         check("kv_quant", got, want, k)
     print(f"rms_apply, kv_quant: {nd} vectors")
+
+    # ---- bp_dots_p (planes = 1..8, including groups == 16 fast path)
+    for it in range(nt):
+        cols = 6 * rng.choice([16, 16, 1, 2, rng.randint(1, 21)])
+        nblk = rng.choice([1, 2, 12, rng.randint(1, 16)])
+        planes = rng.randint(1, 8)
+        x = [rng.choice([0x7FFF, 0x8000, 0, 1, 0xFFFF]) if it % 3 == 0 else rng.getrandbits(16)
+             for _ in range(cols)]
+        cpu.write(DATA_B, b"".join(v.to_bytes(2, "big") for v in x))
+        TAB = 0x80000
+        sx = call("_build_bptab", {R.A0: DATA_B, R.A1: TAB, R.D0: cols})
+        rows = 8 * nblk
+        w = bytes(rng.getrandbits(8) for _ in range(rows * cols))
+        main, spill = bitplanes(w, rows, cols)
+        SPILL = 0xC0000
+        OUT = 0xB0000
+        cpu.write(DATA_A, main)
+        cpu.write(SPILL, spill if planes > 6 else bytes(len(spill)))  # ensure planes<=6 ignores spill
+        drop = 8 - planes
+        bias = s32(sx << 7) if planes >= 8 else (s32((257 - (1 << drop)) * sx) >> 1)
+        call("_bp_dots_p", {R.A0: DATA_A, R.A1: TAB, R.D0: cols // 6, R.D1: OUT, R.D2: nblk,
+                            R.D3: bias, R.D4: SPILL, R.D5: planes})
+        got = rd32(OUT, rows)
+        for r in range(rows):
+            acc_u = sum((((w[r * cols + j] ^ 0x80) >> drop) << drop) * sx16(x[j]) for j in range(cols))
+            want = s32(acc_u - bias)
+            check(f"bp_dots_p(p={planes})", got[r], want, (cols, nblk, r))
+    print(f"bp_dots_p (planes 1..8): {nt} cases")
+
+    # ---- dots_i8_x16_sparse_T
+    for it in range(max(nd // 4, 50)):
+        cols, rows = rng.choice([(256, 96), (96, 96), (64, 15), (rng.randint(1, 260), rng.randint(1, 40))])
+        wt = bytes(rng.getrandbits(8) for _ in range(rows * cols))
+        k = rng.randint(0, min(cols, 65535 // rows))
+        idx = sorted(rng.sample(range(cols), k))
+        val = [rng.getrandbits(16) for _ in range(k)]
+        pairs = b"".join(((i * rows) & 0xFFFF).to_bytes(2, "big") + t.to_bytes(2, "big") for i, t in zip(idx, val))
+        cpu.write(DATA_A, wt)
+        cpu.write(DATA_B, pairs)
+        OUT = 0xB0000
+        call("_dots_i8_x16_sparse_T", {R.A0: DATA_A, R.A1: DATA_B, R.D0: k, R.D1: OUT, R.D2: rows})
+        got = rd32(OUT, rows)
+        want = [s32(sum(sx8(wt[i * rows + r]) * sx16(t) for i, t in zip(idx, val))) for r in range(rows)]
+        check("dots_i8_x16_sparse_T", got, want, (cols, rows, k))
+    print("dots_i8_x16_sparse_T: row loops")
+
+    # ---- rms_sumsq
+    for it in range(nd):
+        cnt = rng.choice([0, 1, 96, rng.randint(0, 200)])
+        x = [edge32() for _ in range(cnt)]
+        wr32(DATA_A, x)
+        OUT_K = 0xB0000
+        ss = call("_rms_sumsq", {R.A0: DATA_A, R.D0: cnt, R.A1: OUT_K}) & M32
+        got_k = rd32(OUT_K, 1)[0]
+        amax = max([((-v) & M32 if v < 0 else v) for v in x] or [0])
+        wk = 0
+        if amax != 0:
+            while (amax >> wk) >= 4096:
+                wk += 1
+        wss = sum(((v < 0 and (-v) & M32 or v) >> wk) ** 2 for v in x) & M32
+        check("rms_sumsq k", got_k, wk, cnt)
+        check("rms_sumsq ss", ss, wss, cnt)
+    print(f"rms_sumsq: {nd} vectors")
+
+    # ---- attention helpers: att_qk_head, att_softmax_wgt, att_wv_head
+    import math
+    exp_tab = [int(round(math.exp(-i / 64.0) * 65536)) for i in range(16 * 64 + 1)]
+    EXP_ADR = 0x70000
+    wr32(EXP_ADR, exp_tab)
+    for it in range(max(nd // 4, 50)):
+        p1 = rng.choice([1, 2, 15, 97, rng.randint(1, 128)])
+        hd = rng.choice([24, 24, 8, 13, rng.randint(1, 32)])
+        stride = hd + rng.choice([0, 72, rng.randint(0, 80)])
+        qsh = rng.randint(0, 12)
+        kc = bytes(rng.getrandbits(8) for _ in range(p1 * stride))
+        qq = [rng.getrandbits(16) for _ in range(hd)]
+        km = [rng.getrandbits(16) for _ in range(p1)]
+        ks = [rng.randint(max(0, qsh - 15), qsh + 47) for _ in range(p1)]
+        cpu.write(DATA_A, kc)
+        cpu.write(DATA_B, b"".join(v.to_bytes(2, "big") for v in qq))
+        KM_ADR, KS_ADR, ATT_ADR = 0x80000, 0x81000, 0x82000
+        cpu.write(KM_ADR, b"".join(v.to_bytes(2, "big") for v in km))
+        cpu.write(KS_ADR, b"".join((v & 0xFFFF).to_bytes(2, "big") for v in ks))
+        mx = call("_att_qk_head", {R.A0: DATA_A, R.A1: DATA_B, R.D0: p1, R.D1: hd, R.D2: stride,
+                                   R.D3: qsh, R.D4: KM_ADR, R.D5: KS_ADR, R.D6: ATT_ADR})
+        want_att = [c_mulshift(s32(sum(sx8(kc[j * stride + i]) * sx16(qq[i]) for i in range(hd))),
+                               km[j], sx16(ks[j] & 0xFFFF) - qsh) for j in range(p1)]
+        check("att_qk_head att", rd32(ATT_ADR, p1), want_att, (p1, hd))
+        check("att_qk_head mx", mx, max(want_att), (p1, hd))
+
+        # att_softmax_wgt
+        att_in = [rng.randint(-12 << 16, 12 << 16) for _ in range(p1)]
+        mx2 = max(att_in)
+        vm = [rng.getrandbits(16) for _ in range(p1)]
+        vs = [rng.randint(-5, 30) for _ in range(p1)]
+        WGT_ADR, VM_ADR, VS_ADR = 0x84000, 0x85000, 0x86000
+        wr32(ATT_ADR, att_in)
+        cpu.write(VM_ADR, b"".join(v.to_bytes(2, "big") for v in vm))
+        cpu.write(VS_ADR, b"".join((v & 0xFFFF).to_bytes(2, "big") for v in vs))
+        call("_att_softmax_wgt", {R.A0: ATT_ADR, R.A1: WGT_ADR, R.D0: p1, R.D1: mx2,
+                                  R.D2: EXP_ADR, R.D3: VM_ADR, R.D4: VS_ADR})
+        want_e = []
+        for s in att_in:
+            u = mx2 - s
+            if u <= 0:
+                want_e.append(65536)
+            elif u >= (16 << 16):
+                want_e.append(0)
+            else:
+                idx = u >> 10
+                frac = (u << 6) & 0xFFFF
+                a, b = exp_tab[idx], exp_tab[idx + 1]
+                want_e.append(a + (((b - a) * frac) >> 16))
+        inv = c_fxdiv(65536, sum(want_e))
+        want_wgt = [c_mulshift(c_fxmul(want_e[j], inv), vm[j], vs[j]) for j in range(p1)]
+        check("att_softmax_wgt", rd32(WGT_ADR, p1), want_wgt, p1)
+
+        # att_wv_head
+        wq16 = [0 if rng.random() < 0.25 else rng.getrandbits(16) for _ in range(p1)]
+        vc = bytes(rng.getrandbits(8) for _ in range(p1 * stride))
+        s_sh = rng.randint(-6, 10)
+        BA_ADR = 0x88000
+        cpu.write(DATA_A, b"".join(v.to_bytes(2, "big") for v in wq16))
+        cpu.write(DATA_B, vc)
+        call("_att_wv_head", {R.A0: DATA_A, R.A1: DATA_B, R.D0: p1, R.D1: hd,
+                              R.D2: stride, R.D3: s_sh, R.D4: BA_ADR})
+        want_ba = []
+        for i in range(hd):
+            acc = s32(sum(sx16(wq16[j]) * sx8(vc[j * stride + i]) for j in range(p1)))
+            want_ba.append(s32(acc >> s_sh) if s_sh >= 0 else s32(acc << (-s_sh)))
+        check("att_wv_head", rd32(BA_ADR, hd), want_ba, (p1, hd, s_sh))
+    print("att_qk_head, att_softmax_wgt, att_wv_head: attention cases")
 
     if fails:
         print(f"FAIL: {fails} mismatches")

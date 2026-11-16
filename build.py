@@ -10,6 +10,9 @@ build.py -- builds and checks for tiny68k. No shell required.
     python build.py amiga      vbcc +kick13 executable, asm kernel -> tiny68k
     python build.py amiga-c    same with the C kernel -> tiny68k_c
     python build.py gate       scripts/m68k_gate.py: vbcc 68000 code == oracle
+    python build.py gui        the GUI (tinyui.c, hardware takeover) -> tinygui
+    python build.py gui-host   the GUI on the host, drawing to files -> tinyui
+    python build.py gui-uae    emu/gui_test.py: tinygui in WinUAE vs the host
     python build.py uae        emu/run_test.py: the executables in WinUAE
                                (add --exact for cycle-exact timing)
 """
@@ -77,6 +80,23 @@ def main():
                  "matmul68k.s", "-o", "matmul68k.o"])
             objs.append("matmul68k.o")
         run([vbcc("vc"), "+kick13", "-o", out] + objs)
+    elif what == "gui":
+        for src in ("tiny68k", "conio68k", "render68k", "tinyui", "tui_amiga"):
+            run([vbcc("vc"), "+kick13", "-c99", "-O2", "-DUSE_ASM", "-DTINY_ENGINE_ONLY",
+                 "-c", src + ".c", "-o", "g_" + src + ".o"])
+        for src in ("matmul68k", "tui68k"):
+            run([vbcc("vasmm68k_mot"), "-quiet", "-Fhunk", "-m68000", "-no-opt",
+                 src + ".s", "-o", src + ".o"])
+        run([vbcc("vc"), "+kick13", "-o", "tinygui",
+             "g_tiny68k.o", "g_conio68k.o", "g_render68k.o", "g_tinyui.o",
+             "g_tui_amiga.o", "matmul68k.o", "tui68k.o"])
+    elif what == "gui-host":
+        cc = shutil.which("gcc", path=env()["PATH"]) or "gcc"
+        run([cc, "-O2", "-Wall", "-Wno-format-overflow", "-DA5_HOST", "-DTINY_ENGINE_ONLY",
+             "-o", "tinyui" + EXE, "tiny68k.c", "conio68k.c", "render68k.c", "tinyui.c",
+             "tui_host.c"])
+    elif what == "gui-uae":
+        run([sys.executable, os.path.join("emu", "gui_test.py")] + sys.argv[2:])
     elif what == "gate":
         run([sys.executable, os.path.join("scripts", "m68k_gate.py")])
     elif what == "uae":

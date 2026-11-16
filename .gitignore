@@ -14,3 +14,9 @@ emu/out/
 emu/*.uae
 tiny68k
 tiny68k_c
+tinygui
+tinyui
+shot_*.bin
+shot_*.png
+gui_themes.png
+gui_amiga_winuae.png

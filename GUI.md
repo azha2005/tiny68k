@@ -1,10 +1,32 @@
-# GUI.md: the TINY interface on the Amiga (stage 4 plan)
+# GUI.md: the TINY interface on the Amiga (stage 4)
 
 TINY.C's DOS interface (80x25 text, neon palette, live neural monitor, digital
-rain boot, PC-speaker robot voice) brought to an A500 with KS 1.2. This is a
-plan, not code yet. The pitfalls cited as Pnn are from the SMW port
+rain boot, PC-speaker robot voice) brought to an A500 with KS 1.2. The
+display, keyboard and UI are built (section 0); sound is still a stub. The pitfalls cited as Pnn are from the SMW port
 (`../smw claude pa/smw-amiga-m/AGENTS.md` section 8), where they were learned the
 hard way.
+
+## 0. What is built
+
+| File | Role |
+|---|---|
+| `conio68k.c/.h` | Turbo C conio subset over an 80x25 cell buffer (CP437 + DOS attribute), dirty flags per cell and row |
+| `render68k.c/.h` | topaz 8 + drawn CP437 glyphs, the 3 themes, dirty-cell renderer into 2 hires planes |
+| `tinyui.c` | TINY.C's UI ported (integer only); F5 cycles the themes; `/dump`, `/dump1`, `/shots`, `/wb13 /wb20 /neon` |
+| `tui_sys.h` | what tinyui needs from the machine |
+| `tui_amiga.c`, `tui68k.s` | A500 backend: own copper list, hardware takeover, keyboard interrupt |
+| `tui_host.c` | host backend for tests: same renderer, keys from `TINY_KEYS`, `sys_shot` files |
+| `emu/gui_test.py` | `tinygui /dump1` in WinUAE; its screen must equal the host's byte for byte |
+| `scripts/shot_png.py` | shot file -> one PNG per theme |
+
+Build: `python build.py gui` (-> `tinygui`), `python build.py gui-host`
+(-> `tinyui`), test: `python build.py gui-uae [--exact]`.
+
+The UI uses its own random generator (`ui_rand`), and a `/dump` fixes the
+sampling seed, the clock (12:00) and the timing (0.0 s), so the screen after
+a dump is the same on every machine. Libc `rand()` differs between vbcc and
+the host: with it the first WinUAE run answered "It is Tallinn." where the
+host answered "Tallinn.".
 
 ## 1. Display: hires 640x200, 2 bitplanes, Workbench colours
 
@@ -69,14 +91,31 @@ authentically Amiga and copies nothing. The CP437 glyphs TINY uses (box
 drawing 179-218, shades 176-178, blocks 219-223, arrows 16/17/24, 175 », 250
 ·, 254 ■) are drawn by us in the same style, as an 8x8 table in the source.
 
-## 3. Input and OS
+## 3. Input and OS: hardware takeover after loading (as built)
 
-System-friendly, not a hardware takeover: an Intuition custom screen (hires, 2
-planes) with a borderless backdrop window. The engine still needs AmigaDOS to
-load `tiny.t68`, and nothing here needs more than that. Keys arrive via IDCMP
-RAWKEY. VANILLAKEY does not exist on KS 1.2, so a US keymap table translates
-them. F1-F5, Esc, Up and Backspace are raw codes anyway. The neon theme's copper
-changes go in a user copper list (`UCopList`, available on 1.2).
+The first plan here was an Intuition screen. It was replaced by a takeover,
+as in the SMW port: it gives the engine back the ~5% that interrupts and
+multitasking cost (section 4b), and the display is ours either way.
+The trade: while TINY runs nothing else multitasks, and `narrator.device`
+(real speech) is not usable.
+
+- **Phase 1, `sys_init()`**, OS alive: chip RAM for planes and copper list
+  (AllocMem, before the model's mallocs), topaz 8 via OpenFont, DateStamp
+  for the clock, then `LoadView(NULL)` and our copper list (BPLCON0 $A200,
+  DIW $4881-$10C1, DDF $3C-$D4, empty sprites), also put in GfxBase
+  LOFlist/SHFlist. AmigaDOS loads `tiny.t68` with a progress bar on our screen.
+- **Phase 2, `sys_takeover()`**: Forbid, all interrupts off except PORTS
+  with `kb_int` (tui68k.s) at $68, DMA = bitplanes + copper + sprites (the
+  empty ones; sprite DMA off would leave the last data on screen), drive
+  motor off. The CIA-A interrupt mask is left as the OS set it.
+- **`sys_done()`** restores vector, DMA, interrupts, the OS copper list and
+  view, Permit, frees chip RAM, and only then writes a pending test shot.
+- Keys: raw codes into a 64-byte ring buffer; a US keymap table (shift,
+  caps lock) in C. The handshake holds SPMODE for three raster line changes.
+- Time: CIA-A TOD counts vertical blanks at 50 Hz with or without the OS;
+  short delays count raster lines (64 us).
+- F5: colours blanked, whole screen redrawn with the new pen mapping, then
+  the new colours loaded (pens depend on the theme, not only the colours).
 
 ## 4. Sound: Paula instead of the PC speaker
 
@@ -118,6 +157,11 @@ Enter, compare the cleaned question with what was prefilled and re-run from
 the first differing position. The separator step (token 1) is a full step.
 
 ## 6. Verification
+
+Status: 2 and 3 are done as `emu/gui_test.py` (the full 3-theme shot from
+WinUAE equals the host's byte for byte, which also shows the OS came back
+to write it). Not covered: the keyboard interrupt and F5 on the Amiga
+(a dump presses no keys), and the comparison with TINY.EXE in DOSBox.
 
 1. The numerical engine stays behind `scripts/verify.py`. The UI never touches
    step(), and reads layer_act / confidence (already in the oracle).

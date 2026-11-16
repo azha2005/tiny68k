@@ -703,11 +703,18 @@ static s32 confidence(const Model *m, int tok)
 /* Told about every letter as soon as it is chosen (the UI prints it then:
    at ~5 s a letter, waiting for the whole answer is not an option). */
 void (*tiny_on_letter)(int c);
+/* Told before each question letter is read (TINY.C's on_step): the UI's
+   scanner. Display only; the numbers do not depend on it. */
+void (*tiny_on_step)(int i, int n);
 
 static int think(const Model *m, const char *q, char *out, int creativity)
 {
-    int p = 0, n = 0, tok;
-    for (; q[p]; p++) step(m, q[p] - 30, p, 0);     /* prefill */
+    int p = 0, n = 0, tok, nq = 0;
+    while (q[nq]) nq++;
+    for (; q[p]; p++) {                              /* prefill */
+        if (tiny_on_step) tiny_on_step(p, nq);
+        step(m, q[p] - 30, p, 0);
+    }
     step(m, 1, p++, 1);                              /* its scores pick letter 1 */
     for (; p < CTX; p++) {
         tok = pick(m, creativity);

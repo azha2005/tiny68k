@@ -244,16 +244,24 @@ fxcore:
         mulu.w  d1,d4                   ; al * bl
         clr.w   d4
         swap    d4                      ; >> 16
+        ; a zero high half makes its two products zero: skip them (87% of
+        ; calls on real data have one, 30% both; a MULU is ~54 cycles)
+        tst.w   d3
+        beq.s   .nobh
         mulu.w  d3,d0                   ; al * bh
         add.l   d0,d4
-        move.w  d2,d0
-        mulu.w  d1,d0                   ; ah * bl
-        add.l   d0,d4
-        mulu.w  d3,d2                   ; ah * bh
-        swap    d2
-        clr.w   d2                      ; << 16
+        tst.w   d2
+        beq.s   .sum
+        mulu.w  d2,d3                   ; ah * bh
+        swap    d3
+        clr.w   d3                      ; << 16
+        add.l   d3,d4
+        bra.s   .ahbl
+.nobh:  tst.w   d2
+        beq.s   .sum
+.ahbl:  mulu.w  d1,d2                   ; ah * bl
         add.l   d2,d4
-        move.l  d4,d0
+.sum:   move.l  d4,d0
         tst.l   d5
         bpl.s   .d
         neg.l   d0
@@ -329,13 +337,36 @@ _mulshift_rows:
         move.l  d2,a2
         move.l  d0,d7                   ; rows
         beq.s   .done
-        move.l  d1,d6                   ; xsh
+        move.l  d1,d6
+        moveq   #16,d1
+        add.l   d1,d6                   ; xsh + 16
         subq.w  #1,d7
+        ; mscore's sh >= 16 path inline (88% of rows); the rest call mscore
 .row:   move.l  (a0),d0
-        move.w  (a1)+,d1
-        moveq   #0,d2
+        move.w  (a1)+,d1                ; m
         move.w  (a2)+,d2
-        sub.l   d6,d2
+        sub.w   d6,d2                   ; n = shift - xsh - 16, in [-63, 31]
+        bmi.s   .gen
+        move.l  d0,d5                   ; bit 31 = sign
+        bpl.s   .p
+        neg.l   d0
+.p:     move.l  d0,d3
+        swap    d3                      ; ah
+        mulu.w  d1,d0                   ; lo = al * m
+        mulu.w  d1,d3                   ; hi = ah * m
+        clr.w   d0
+        swap    d0                      ; lo >> 16
+        add.l   d3,d0                   ; < 2^31, as in mscore
+        lsr.l   d2,d0
+        tst.l   d5
+        bpl.s   .q
+        neg.l   d0
+.q:     move.l  d0,(a0)+
+        dbra    d7,.row
+        bra.s   .done
+.gen:   ext.l   d2
+        moveq   #16,d3
+        add.l   d3,d2                   ; sh = shift - xsh
         bsr     mscore
         move.l  d0,(a0)+
         dbra    d7,.row

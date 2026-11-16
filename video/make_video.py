@@ -16,6 +16,9 @@ if len(sys.argv) < 3:
 REC, FLOP = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 OUT = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HERE, "tiny68k_a500_60s.mp4")
 TOTAL = 60.0
+# The phone footage of the monitor is washed out (grey blacks, flat colour).
+GRADE_REC = "eq=contrast=1.25:brightness=-0.04:saturation=1.4:gamma=0.88"
+GRADE_FLOPPY = "eq=contrast=1.15:saturation=1.25:gamma=0.92"
 SEG = os.path.join(tempfile.gettempdir(), "tiny68k_video_seg")
 os.makedirs(SEG, exist_ok=True)
 
@@ -74,7 +77,8 @@ used = 0.0
 for i, (src, a, b, sp, cap, gain) in enumerate(SEGMENTS):
     dur = (b - a) / sp
     used += dur
-    vf = [f"setpts=(PTS-STARTPTS)/{sp}", "fps=30", "scale=1920:1080", "setsar=1"]
+    vf = [f"setpts=(PTS-STARTPTS)/{sp}", "fps=30", "scale=1920:1080", "setsar=1",
+          GRADE_FLOPPY if src == FLOP else GRADE_REC]
     if sp != 1:
         badge = f">> x{sp:g}"
         vf.append(f"drawtext=fontfile='{FONT}':text='{esc(badge)}':x=w-tw-48:y=40:"

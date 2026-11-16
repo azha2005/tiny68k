@@ -44,6 +44,33 @@ verification loop**, which amiga260k never had. Musashi cycles per letter
 55.7M at position 96 (7.9 s); C kernel 97.6M (13.8 s). The estimate was
 3.9 s: the difference is overhead outside the MACs, still to be profiled.
 
+Optimisation round 1 (2026-11-15), all bit-exact, the oracle untouched:
+`fxmul`, `mulshift`, the attention value pass and the dot products in asm
+with vbcc `__reg` register calls; f2 skips the ReLU zeros (`matmul_q_sparse`,
+~81% of its inputs); wk/wv/wq and f1 use **column tables** (`matmul_tab`:
+`build_tab` precomputes w*x for all 256 int8 w per input column, then
+`tab_dots` sums look-ups in 8 register accumulators, ~40 cycles per MAC
+instead of ~76 with MULS). The weights of those tables are reordered at
+`tiny_init` into 8-row column-major blocks, in place; the blob is then
+marked `T68B`. Caller memory (`tiny_kv_bytes`) now also holds the tables,
+D*1 KB. Musashi: position 0 5.03 -> 3.29 s, position 96 7.85 -> 4.81 s.
+`scripts/asm_unit.py` tests each asm routine against its C fallback with
+random/edge register arguments and checks d2-d7/a2-a6 are preserved.
+`scripts/muls_bits.py`: as MULS source the int8 weights average 3.6 bit
+transitions, the int16 activations 7.2 (MULS = 38+2n). Swapping operands
+would save only ~4% net (one more load) and Musashi does not model it, so it
+was not done; with the tables most MULS are gone anyway.
+
+WinUAE (`emu/run_test.py`): it used to wait for a `done.txt` that KS 1.2
+never wrote (no C: on the floppy, so no `echo`), and WinUAE throttled itself
+while its window was inactive. Now it ends when every output has its timing
+lines, fast mode disables inactive pause/priority drop, sound and most
+frames, and it runs 1 question by default (`-n 2` for both): ~30 s for both
+executables. `ticks()` read 0 because KS 1.x DateStamp() (BCPL) needs a
+longword-aligned struct; fixed. Fast-mode times are not Amiga times; use
+`--exact` for those. Never use JIT for this check: it needs a 68020, which
+does not trap on odd-address accesses.
+
 ## matmul68k.s and vbcc
 
 Unlike in amiga260k, **any change to `matmul68k.s` or to how vbcc compiles
@@ -102,7 +129,10 @@ these still fit. The value-weight path assumes value absmax < 64.
 | `tiny68k.c` | the engine (stage 2): step(), pick(), think(), plain-text UI |
 | `scripts/verify.py` | **the gate**: C == oracle (scores, layer activity, answers) |
 | `GUI.md` | stage 4 plan: display, palettes, conio layer, sound, SMW lessons |
-| `matmul68k.s` | 68000 dot product, `dot_i8_x16` (from amiga260k, unchanged) |
+| `matmul68k.s` | 68000 hot routines: dot products, sparse dot, column tables, fxmul, mulshift (register calls) |
+| `scripts/asm_unit.py` | each `matmul68k.s` routine vs its C fallback, register preservation |
+| `scripts/muls_bits.py` | MULS operand bit-transition statistics on real data |
+| `scripts/m68k_prof.py` | per-function cycle profile in Musashi |
 | `scripts/m68k_gate.py` | vbcc-compiled engine in Musashi/Unicorn == oracle, + cycles |
 | `emu/run_test.py` | the hunk executables in WinUAE, KS 1.2, 512K + 512K A501 |
 | `build.py` | `ref convert check host verify amiga amiga-c gate uae` |
@@ -124,8 +154,8 @@ file tool.
 2. **Done**: `tiny68k.c` host build + `scripts/verify.py`.
 3. **Done**: kick13 cross build (plain text, letters streamed as chosen),
    68000 gate in Musashi, executables on KS 1.2 in WinUAE.
-   Next: cycle-exact timing per letter, and a profile of where the cycles
-   outside the MACs go (35.7M measured vs 27.6M estimated at position 0).
+   Optimisation round 1 done (3.29 s/letter at position 0 in Musashi).
+   Next: cycle-exact timing per letter in WinUAE (`--exact`).
 4. Amiga UI per `GUI.md`: hires 2 planes, Workbench palette themes, conio
    layer with TINY.C's UI code, Paula voice, reading while typing.
 5. Optional: own data generator + trainer for a bigger model (see README).

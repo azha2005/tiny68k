@@ -8,7 +8,7 @@ A500 with 512K chip + 512K A501 slow RAM.
 
 Builds a bootable OFS floppy (amitools xdftool) with tiny68k, tiny68k_c,
 tiny.t68 and a startup-sequence that runs `-ask -time` with output to DF0:,
-boots WinUAE, polls the floppy for a done marker, then reads the outputs
+boots WinUAE, polls the floppy until every output has its timing lines, then reads them
 back. This checks what m68k_gate.py cannot: the hunk executable itself,
 vbcc's kick13 startup and libc, file loading, malloc of 386 KB on a 1 MB
 machine, and (with --exact) real A500 timing including DMA contention.
@@ -42,12 +42,12 @@ def xdf(adf, *cmds, check=True):
     return r
 
 
-def build_disk(exact):
+def build_disk(exact, nq):
     files = ["tiny68k", "tiny.t68"] + ([] if exact else ["tiny68k_c"])
     for f in files:
         if not os.path.exists(os.path.join(ROOT, f)):
             sys.exit(f"missing {f}: run python build.py amiga / amiga-c / convert")
-    qs = QUESTIONS[:1] if exact else QUESTIONS
+    qs = QUESTIONS[:nq]
     tmp = tempfile.mkdtemp()
     qf = os.path.join(tmp, "q.txt")
     with open(qf, "w", newline="\n") as f:
@@ -55,7 +55,6 @@ def build_disk(exact):
     lines = ["tiny68k <q.txt >DF0:out_asm.txt tiny.t68 -ask -time"]
     if not exact:
         lines.append("tiny68k_c <q.txt >DF0:out_c.txt tiny.t68 -ask -time")
-    lines.append('echo >DF0:done.txt "done"')
     ss = os.path.join(tmp, "startup-sequence")
     with open(ss, "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
@@ -93,8 +92,17 @@ def write_config(rom, exact):
         "floppy0type=0",
         "floppy0wp=false",
         "nr_floppies=1",
+        "sound_output=none" if not exact else "sound_output=exact",
+        "gfx_framerate=10" if not exact else "gfx_framerate=1",
         "floppy_speed=800" if not exact else "floppy_speed=100",
         "win32.start_not_captured=true",
+        # The window starts uncaptured, i.e. inactive: without these WinUAE
+        # lowers its own priority and runs far below "max" speed.
+        "win32.inactive_pause=false",
+        "win32.inactive_nosound=true",
+        "win32.inactive_priority=1",
+        "win32.active_priority=1",
+        "win32.minimized_pause=false",
         "win32.nonotificationicon=true",
     ]
     with open(CFG, "w", newline="\n") as f:
@@ -119,6 +127,7 @@ def main():
     ap.add_argument("--exact", action="store_true", help="cycle-exact A500, timing")
     ap.add_argument("--rom", default=ROM)
     ap.add_argument("--timeout", type=int, default=0)
+    ap.add_argument("-n", type=int, default=1, help="questions per executable (max %d)" % len(QUESTIONS))
     args = ap.parse_args()
     if not os.path.exists(args.rom):
         sys.exit("no Kickstart ROM at " + args.rom)
@@ -126,7 +135,7 @@ def main():
         sys.exit("WinUAE not found at " + WINUAE)
     timeout = args.timeout or (900 if args.exact else 600)
 
-    qs = build_disk(args.exact)
+    qs = build_disk(args.exact, args.n)
     write_config(args.rom, args.exact)
     out = os.path.join(EMU, "out")
     os.makedirs(out, exist_ok=True)
@@ -136,9 +145,22 @@ def main():
     p = subprocess.Popen([WINUAE, "-f", CFG], cwd=EMU)
     t0 = time.time()
     done = None
+    seen_asm = False
+    names = ["out_asm.txt"] + ([] if args.exact else ["out_c.txt"])
     while time.time() - t0 < timeout and p.poll() is None:
-        time.sleep(15)
-        done = read_back("done.txt", out)
+        time.sleep(5)
+        # Done when every executable has printed a timing line per question.
+        # (No marker file: the boot floppy has no C: directory, so there is
+        # no `echo` on KS 1.2.)
+        done = True
+        for name in names:
+            txt = read_back(name, out) or ""
+            n = sum(1 for l in txt.splitlines() if l.lstrip().startswith("["))
+            if n < len(qs):
+                done = False
+            elif name == "out_asm.txt" and not seen_asm:
+                seen_asm = True
+                print(f"  tiny68k (asm) finished after {time.time() - t0:.0f}s", flush=True)
         if done:
             break
     elapsed = time.time() - t0
@@ -146,7 +168,7 @@ def main():
     if p.poll() is None:
         p.kill()
         time.sleep(2)
-    print(f"emulator ran {elapsed:.0f}s" + ("" if done else " -- NO DONE MARKER (timeout)"))
+    print(f"emulator ran {elapsed:.0f}s" + ("" if done else " -- TIMEOUT before every output was complete"))
 
     sys.path.insert(0, ROOT)
     import oracle_tiny as O

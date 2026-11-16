@@ -124,7 +124,7 @@ with open(lst, "w") as f:
         f.write(f"file '{p.replace(os.sep, '/')}'\n")
 # re-encode on concat so timestamps are clean; limit audio peaks
 run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst,
-     "-vf", "fade=t=in:d=0.3", "-af", "alimiter=limit=0.9",
+     "-af", "alimiter=limit=0.9",   # no fade-in: frame 0 is the thumbnail
      "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
      "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", OUT])
 print("wrote", OUT)
